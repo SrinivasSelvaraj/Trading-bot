@@ -61,7 +61,9 @@ class RoundState:
     _last_note: str = ""
 
     def observe(self, up: float | None, down: float | None) -> None:
-        self.up, self.down = up, down
+        """Record a reading that passed the data checks. After a fill, up/down stay at the entry values."""
+        if self.fill_status != FILLED:
+            self.up, self.down = up, down
         if up is not None:
             self.peak_up = up if self.peak_up is None else max(self.peak_up, up)
         if down is not None:
@@ -225,7 +227,6 @@ class Bot:
         up_book, down_book = books
         up = to_pct(displayed_probability(up_book))
         down = to_pct(displayed_probability(down_book))
-        st.observe(up, down)
 
         if up is None or down is None:
             decision = INVALID
@@ -237,6 +238,7 @@ class Bot:
         if decision == INVALID:
             st.note(logging.WARNING, f"Prices look inconsistent (UP {up}%, DOWN {down}%), not trading")
             return
+        st.observe(up, down)
         if decision == CONFLICT or st.conflict:
             if not st.conflict:
                 st.conflict = True

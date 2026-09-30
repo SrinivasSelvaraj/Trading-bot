@@ -236,6 +236,23 @@ def test_trades_once_at_98_and_settles_win(env):
     assert cfg.csv_path.read_text().count("\n") == 2  # header + one row
 
 
+def test_inconsistent_readings_after_fill_do_not_overwrite_entry_values(env):
+    cfg, client, store, clock, bot = env
+    set_books(client, 0.98, 0.99, 0.01, 0.02)  # UP 98.5 / DOWN 1.5 -> trade
+    bot.tick()
+    set_books(client, 0.99, None, 0.99, None)  # both sides read 99% (seen live): rejected
+    clock.t += 5
+    bot.tick()
+    set_books(client, 0.99, 1.0, 0.0, 0.01)  # valid, higher reading after the fill
+    clock.t += 5
+    bot.tick()
+    bot._close_round(bot.state)
+    row = store.get_round(slug_for(START))
+    assert (row["up_percentage"], row["down_percentage"]) == (98.5, 1.5)
+    assert row["peak_down"] == 1.5
+    assert store.conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 1
+
+
 def test_loss_is_full_stake(env):
     cfg, client, store, clock, bot = env
     set_books(client, 0.01, 0.03, 0.97, 0.99)  # DOWN 98%
