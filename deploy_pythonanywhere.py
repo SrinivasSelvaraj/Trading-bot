@@ -18,6 +18,7 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -57,7 +58,13 @@ class PA:
         if self.dry_run:
             print(f"  [dry-run] {method} {path}")
             return None
-        resp = self.session.request(method, self.base + path, timeout=60, **kw)
+        for _ in range(6):
+            resp = self.session.request(method, self.base + path, timeout=60, **kw)
+            if resp.status_code != 429:
+                break
+            wait = int(resp.headers.get("Retry-After") or 30) + 1
+            print(f"  rate limited, waiting {wait}s")
+            time.sleep(wait)
         if resp.status_code >= 400 and resp.status_code not in allow:
             raise SystemExit(f"{method} {path} failed: HTTP {resp.status_code} {resp.text[:300]}")
         return resp
@@ -81,7 +88,8 @@ def main() -> int:
 
     pa = PA(host, user, token, args.dry_run)
     home = f"/home/{user}"
-    domain = f"{user}.pythonanywhere.com" if host.startswith("www.") else f"{user}.{host.split('.', 1)[0]}.pythonanywhere.com"
+    region = "" if host.startswith("www.") else host.split(".", 1)[0] + "."
+    domain = f"{user}.{region}pythonanywhere.com".lower()  # web app domains are lowercase
     python_bin = args.python.replace("python3", "python3.")  # python311 -> python3.11
 
     files = project_files()
@@ -90,8 +98,9 @@ def main() -> int:
         pa.upload(f"{home}/{PROJECT_DIR}/{rel}", (ROOT / rel).read_bytes())
 
     print(f"2/4 Web app {domain}")
-    existing = pa.call("GET", f"/webapps/{domain}/")
-    if existing is None or existing.status_code == 404:
+    webapps = pa.call("GET", "/webapps/", allow=())
+    names = [w.get("domain_name", "").lower() for w in webapps.json()] if webapps is not None else []
+    if domain not in names:
         pa.call("POST", "/webapps/", allow=(), data={"domain_name": domain, "python_version": args.python})
     pa.call("PATCH", f"/webapps/{domain}/", allow=(), data={"force_https": "true"})
     pa.upload(f"/var/www/{domain.replace('.', '_')}_wsgi.py", wsgi_file(home).encode())
