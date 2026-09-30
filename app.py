@@ -17,7 +17,7 @@ import threading
 import time
 from http.server import ThreadingHTTPServer
 
-from bot import Bot
+from bot import EXIT_RESTART, Bot
 from config import Config, load_config
 from dashboard import make_handler
 from logger import TradeStore, setup_logging
@@ -40,6 +40,8 @@ def run_bot_forever(cfg: Config) -> None:
             code = None
         finally:
             store.close()
+        if code == EXIT_RESTART:
+            continue  # restart requested from the dashboard: fresh bot straight away
         if code is not None and (cfg.stop_file.exists() or code == 2):
             log.warning("Bot stopped (exit code %s). Dashboard stays up.", code)
             return

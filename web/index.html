@@ -220,6 +220,24 @@
   }
   .toast.err { background: var(--critical); color: #fff; }
 
+  input[type="text"] { font: inherit; font-size: 15px; color: var(--text-primary); background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%; }
+  .maint { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  @media (max-width: 900px) { .maint { grid-template-columns: minmax(0, 1fr); } }
+  .maint-block { background: var(--surface-2); border-radius: 10px; padding: 14px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+  .maint-block h3 { margin: 0; font-size: 14px; }
+  .maint-block .h-note { margin: 0; }
+  .maint-block.danger { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--critical) 45%, transparent); }
+  .danger-btn { background: var(--critical); color: #fff; border: 0; padding: 9px 14px; font-weight: 650; }
+  .row-actions.wrap { flex-wrap: wrap; }
+  .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+  .checks li { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 6px; }
+  .checks .i { font-weight: 800; text-align: center; }
+  .checks .ok .i { color: var(--good-text); }
+  .checks .warn .i { color: var(--text-secondary); }
+  .checks .fail .i { color: var(--critical-text); }
+  .checks b { font-weight: 650; }
+
   footer { margin-top: 18px; font-size: 12px; color: var(--text-muted); }
   .banner { margin-bottom: 14px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); font-size: 13px; display: none; }
 </style>
@@ -281,7 +299,7 @@
           <button type="button" class="side-btn up" id="side-UP" role="radio" aria-checked="true">Buy UP <span class="num" id="ask-UP">–</span></button>
           <button type="button" class="side-btn down" id="side-DOWN" role="radio" aria-checked="false">Buy DOWN <span class="num" id="ask-DOWN">–</span></button>
         </div>
-        <label class="field">Amount (₹)
+        <label class="field">Amount (₹) <span class="opt" id="amt-limits"></span>
           <input id="amt" type="number" inputmode="decimal" min="1" step="1" value="1100" required>
         </label>
         <div class="chips" id="chips">
@@ -289,13 +307,14 @@
           <button type="button" data-amt="5000">₹5,000</button>
           <button type="button" data-amt="10000">₹10,000</button>
           <button type="button" data-amt="25000">₹25,000</button>
+          <button type="button" data-amt="max">Max</button>
         </div>
         <div class="two">
-          <label class="field">Take profit (¢) <span class="opt">optional</span>
-            <input id="tp" type="number" inputmode="decimal" min="1" max="99" step="0.5" placeholder="off">
+          <label class="field">Take profit (¢) <span class="opt">optional, 1–99</span>
+            <input id="tp" type="number" inputmode="decimal" min="0.01" max="99" step="any" placeholder="off">
           </label>
-          <label class="field">Stop loss (¢) <span class="opt">optional</span>
-            <input id="sl" type="number" inputmode="decimal" min="1" max="99" step="0.5" placeholder="off">
+          <label class="field">Stop loss (¢) <span class="opt">optional, 1–99</span>
+            <input id="sl" type="number" inputmode="decimal" min="0.01" max="99" step="any" placeholder="off">
           </label>
         </div>
         <div class="est" id="est">Enter an amount to see the estimate.</div>
@@ -317,11 +336,11 @@
       </div>
       <p class="h-note">When UP or DOWN reaches 98%, the bot buys a fixed ₹<span id="auto-stake">1,100</span> on that side, once per round. Exits below apply to its new trades; edit an open trade's exits in the positions table.</p>
       <div class="two">
-        <label class="field">Take profit (¢) <span class="opt">optional</span>
-          <input id="auto-tp" type="number" inputmode="decimal" min="1" max="99" step="0.5" placeholder="off">
+        <label class="field">Take profit (¢) <span class="opt">99 or off</span>
+          <input id="auto-tp" type="number" inputmode="decimal" min="0.01" max="99" step="any" placeholder="off">
         </label>
-        <label class="field">Stop loss (¢) <span class="opt">optional</span>
-          <input id="auto-sl" type="number" inputmode="decimal" min="1" max="99" step="0.5" placeholder="off">
+        <label class="field">Stop loss (¢) <span class="opt">below 98, optional</span>
+          <input id="auto-sl" type="number" inputmode="decimal" min="0.01" max="99" step="any" placeholder="off">
         </label>
       </div>
       <button type="button" class="secondary" id="auto-save">Save exits</button>
@@ -336,7 +355,7 @@
         <div class="tile"><div class="k">98% signals</div><div class="v num" id="t-sig">–</div><div class="s" id="t-sig-s"></div></div>
         <div class="tile"><div class="k">Rounds watched</div><div class="v num" id="t-rounds">–</div><div class="s" id="t-rounds-s"></div></div>
         <div class="tile" style="grid-column: 1 / -1">
-          <div class="k">Today vs daily loss limit</div>
+          <div class="k">Auto-trader today vs its daily loss limit</div>
           <div class="v num" id="t-today">–</div>
           <div class="meter" aria-hidden="true"><div id="t-today-m" style="width:0"></div></div>
           <div class="s" id="t-today-s"></div>
@@ -393,6 +412,36 @@
     </div>
   </section>
 
+  <section class="card section" aria-labelledby="maint-h">
+    <h2 id="maint-h">Maintenance</h2>
+    <div class="maint">
+      <div class="maint-block">
+        <h3>System check</h3>
+        <p class="h-note">Checks the bot, its data and Polymarket, and says what to do about anything wrong. Run it when an order won't go through.</p>
+        <button type="button" class="secondary" id="run-check">Run system check</button>
+        <ul class="checks" id="checks"></ul>
+      </div>
+      <div class="maint-block">
+        <h3>Fix a stuck app</h3>
+        <p class="h-note"><b>Clear stuck orders</b> cancels actions the bot hasn't picked up. <b>Restart bot</b> restarts the trading loop without touching your trades or balance; it needs the bot to be responding, otherwise restart the app itself.</p>
+        <div class="row-actions wrap">
+          <button type="button" class="secondary" id="clear-pending">Clear stuck orders</button>
+          <button type="button" class="secondary" id="restart-bot">Restart bot</button>
+        </div>
+        <div class="form-msg" id="fix-msg" role="status" aria-live="polite"></div>
+      </div>
+      <div class="maint-block danger">
+        <h3>Reset paper account</h3>
+        <p class="h-note">Deletes every trade, round and setting and starts again with ₹<span id="reset-balance">1,00,000</span>. The old trades.csv is kept under a new name. This can't be undone.</p>
+        <label class="field">Type RESET to confirm
+          <input id="reset-confirm" type="text" autocomplete="off" spellcheck="false" placeholder="type RESET here">
+        </label>
+        <button type="button" class="danger-btn" id="reset-account" disabled>Reset paper account</button>
+        <div class="form-msg" id="reset-msg" role="status" aria-live="polite"></div>
+      </div>
+    </div>
+  </section>
+
   <footer>
     Paper trading only: no real orders are ever placed. Prices, fills and fees come from Polymarket's live order books. Auto-trader rule: trade only when UP or DOWN is at least 98%, fixed ₹<span id="f-stake">1,100</span> stake.
     At a 99¢ entry a win pays about ₹10 and a loss costs about ₹1,100, so the rule needs a win rate above ~99% to break even.
@@ -412,7 +461,9 @@
   let lastOk = 0;        // time of last successful fetch
   // Set by `python dashboard.py --snapshot`: a saved copy of the page with its data built in.
   const SNAP = window.__SNAPSHOT__ || null;
-  const nowMs = () => SNAP ? SNAP.now * 1000 : Date.now();
+  // Server time, so a device clock that's off doesn't block trading or skew the countdown.
+  let clockSkewMs = 0;
+  const nowMs = () => SNAP ? SNAP.now * 1000 : Date.now() + clockSkewMs;
 
   const timeFmt = (iso) => {
     try { return new Date(iso).toLocaleTimeString("en-IN", {timeZone: TZ, hour: "2-digit", minute: "2-digit"}); }
@@ -505,7 +556,9 @@
     const m = $("t-today-m");
     m.style.width = used + "%";
     m.className = used >= 60 ? "warn" : "";
-    $("t-today-s").textContent = `Loss limit ${inr(limit)} · ${used.toFixed(0)}% used · day in ${rules.timezone}`;
+    const manual = st ? st.manual_realized_today_inr : null, mlimit = st ? st.max_manual_daily_loss_inr : null;
+    $("t-today-s").textContent = `Limit ${inr(limit)} · ${used.toFixed(0)}% used · day in ${rules.timezone}` +
+      (manual == null ? "" : ` · manual trades today ${inr(manual, true)}${mlimit ? ` (limit ${inr(mlimit)})` : ""}`);
   }
 
   // ---------- chart ----------
@@ -660,9 +713,11 @@
     } else if (b.dataset.act === "cancel") {
       delete editing[id];
     } else if (b.dataset.act === "save") {
-      const e = editing[id];
+      const tr = b.closest("tr");
+      const exits = readExits(tr.querySelector('input[data-f="tp"]'), tr.querySelector('input[data-f="sl"]'));
+      if (exits.error) { toast(exits.error, false); return; }
       b.disabled = true;
-      const ok = await act("SET_EXITS", {position_id: +id, take_profit: e.tp, stop_loss: e.sl}, `Exits for #${id}`);
+      const ok = await act("SET_EXITS", {position_id: +id, take_profit: exits.tp, stop_loss: exits.sl}, `Exits for #${id}`);
       if (ok) delete editing[id]; else b.disabled = false;
     } else if (b.dataset.act === "sell") {
       b.disabled = true;
@@ -732,13 +787,40 @@
     }
   }
 
+  // ---------- price inputs: cents like 95, or dollars like 0.95; always send cents ----------
+  function readCents(el, label) {
+    if (el.validity && el.validity.badInput) return {error: `${label}: type numbers only, like 95 for 95¢`};
+    const raw = el.value.trim();
+    if (raw === "") return {value: ""};
+    let v = parseFloat(raw);
+    if (!Number.isFinite(v)) return {error: `${label}: enter a price in cents, like 95`};
+    if (v > 0 && v < 1) v = +(v * 100).toFixed(2);  // 0.95 means 95¢
+    if (v < 1 || v > 99) return {error: `${label} must be between 1¢ and 99¢ (you entered ${raw})`};
+    return {value: v};
+  }
+  function readExits(tpEl, slEl) {
+    const tp = readCents(tpEl, "Take profit"), sl = readCents(slEl, "Stop loss");
+    if (tp.error || sl.error) return {error: tp.error || sl.error};
+    if (tp.value !== "" && sl.value !== "" && tp.value <= sl.value) return {error: "Take profit must be above stop loss"};
+    return {tp: tp.value, sl: sl.value};
+  }
+
   // ---------- trade ticket ----------
   let side = "UP";
-  function tradingOpen(data) {
+  // Why orders can't be placed right now, or "" when they can.
+  function blockedReason(data) {
+    if (SNAP) return "This is a saved snapshot; open the live dashboard to trade.";
+    if (data.bot.state === "stopped") return "Emergency stop is on, so trading is off.";
+    if (data.bot.state !== "running") return "The bot isn't running, so orders can't be filled. See Maintenance → System check.";
     const st = data.bot.status, r = st && st.round;
-    return !SNAP && data.bot.state === "running" && r && r.quote && r.accepting_orders !== false &&
-      (new Date(r.round_end).getTime() - Date.now()) / 1000 > (st.no_trade_last_seconds ?? 3);
+    if (!r) return "Waiting for Polymarket to list the next round…";
+    const left = (new Date(r.round_end).getTime() - nowMs()) / 1000;
+    if (left <= (st.no_trade_last_seconds ?? 3)) return `This round closes in ${Math.max(0, Math.ceil(left))}s; the next one opens right after.`;
+    if (r.accepting_orders === false) return "This market isn't accepting orders.";
+    if (!r.quote) return st.warning ? `No live order book this moment (${st.warning}). Retrying every 2 seconds.` : "Loading the order book…";
+    return "";
   }
+  const tradingOpen = (data) => blockedReason(data) === "";
   for (const s of ["UP", "DOWN"]) {
     $("side-" + s).addEventListener("click", () => {
       side = s;
@@ -746,19 +828,28 @@
       renderTicket();
     });
   }
-  $("chips").addEventListener("click", (ev) => { const b = ev.target.closest("button[data-amt]"); if (b) { $("amt").value = b.dataset.amt; renderTicket(); } });
+  // largest amount whose buy fee (at most feeRate × amount) still fits in free cash
+  const maxOrder = () => last ? Math.floor(Math.min(last.wallet.cash_inr / (1 + last.rules.taker_fee_rate), last.rules.max_manual_order_inr)) : 0;
+  $("chips").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-amt]");
+    if (b) { $("amt").value = b.dataset.amt === "max" ? maxOrder() : b.dataset.amt; renderTicket(); }
+  });
   for (const id of ["amt", "tp", "sl"]) $(id).addEventListener("input", () => renderTicket());
   function renderTicket() {
     if (!last) return;
     const r = last.bot.status && last.bot.status.round, q = r && r.quote, rate = last.rules.inr_per_usd;
     for (const s of ["UP", "DOWN"]) $("ask-" + s).textContent = q && q[s].ask != null ? (q[s].ask * 100).toFixed(1) + "¢" : "–";
     if (last.actions.key_required && !store.get()) $("key-field").hidden = false;
-    const open = tradingOpen(last);
+    const why = blockedReason(last), open = why === "";
     $("place").disabled = !open;
-    const amt = parseFloat($("amt").value);
+    $("amt-limits").textContent = `free ₹${Math.floor(last.wallet.cash_inr).toLocaleString("en-IN")} · max ₹${Number(last.rules.max_manual_order_inr).toLocaleString("en-IN")} per order`;
+    const amt = parseFloat($("amt").value), exits = readExits($("tp"), $("sl"));
     let est;
-    if (!open) est = SNAP ? "Snapshot: trading is off." : (last.bot.state !== "running" ? "The bot is offline, so orders can't be filled." : "Waiting for live prices or the next round…");
+    if (!open) est = why;
     else if (!(amt > 0)) est = "Enter an amount in ₹.";
+    else if (amt > last.rules.max_manual_order_inr) est = `That's above the ₹${Number(last.rules.max_manual_order_inr).toLocaleString("en-IN")} per-order limit.`;
+    else if (amt * (1 + last.rules.taker_fee_rate) > last.wallet.cash_inr) est = `Amount plus the buy fee could exceed your free cash (${inr(last.wallet.cash_inr)}). Try Max.`;
+    else if (exits.error) est = exits.error;
     else if (q[side].ask == null) est = `Nobody is selling ${side} right now, so an order would not fill.`;
     else {
       const ask = q[side].ask, shares = amt / rate / ask, fee = shares * last.rules.taker_fee_rate * ask * (1 - ask) * rate;
@@ -768,10 +859,11 @@
   }
   $("ticket-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    const amt = parseFloat($("amt").value), msg = $("ticket-msg");
-    if (!(amt > 0)) { msg.textContent = "Enter an amount in ₹."; msg.className = "form-msg err"; return; }
+    const amt = parseFloat($("amt").value), msg = $("ticket-msg"), exits = readExits($("tp"), $("sl"));
+    const bad = !(amt > 0) ? "Enter an amount in ₹." : exits.error;
+    if (bad) { msg.textContent = bad; msg.className = "form-msg err"; return; }
     $("place").disabled = true;
-    await act("BUY", {side, amount_inr: amt, take_profit: $("tp").value, stop_loss: $("sl").value}, `Buy ${side}`, msg);
+    await act("BUY", {side, amount_inr: amt, take_profit: exits.tp, stop_loss: exits.sl}, `Buy ${side}`, msg);
     renderTicket();
   });
 
@@ -781,6 +873,10 @@
   function renderAuto(data) {
     const st = data.bot.status, s = st && st.bot_settings;
     $("auto-stake").textContent = Number(data.rules.stake_inr).toLocaleString("en-IN");
+    $("reset-balance").textContent = Number(data.wallet.starting_balance_inr).toLocaleString("en-IN");
+    const responding = !SNAP && data.bot.state === "running";
+    $("restart-bot").disabled = !responding;
+    $("restart-bot").title = responding ? "" : "The bot isn't responding, so it can't restart itself. Restart the app instead (see System check).";
     const off = SNAP || data.bot.state !== "running";
     if (!s) { $("auto-state").textContent = "Bot offline"; $("auto-state").className = "auto-state"; $("auto-toggle").disabled = true; $("auto-save").disabled = true; return; }
     $("auto-state").textContent = s.enabled ? "Trading" : "Paused";
@@ -793,16 +889,57 @@
     }
   }
   const autoCurrent = () => (last && last.bot.status && last.bot.status.bot_settings) || {enabled: true};
-  const toCents = (v) => v == null ? "" : +(v * 100).toFixed(1);
   $("auto-toggle").addEventListener("click", async () => {
     const s = autoCurrent();
     $("auto-toggle").disabled = true;
-    await act("BOT_SETTINGS", {enabled: !s.enabled, take_profit: toCents(s.take_profit), stop_loss: toCents(s.stop_loss)}, "Auto-trader", $("auto-msg"));
+    await act("BOT_SETTINGS", {enabled: !s.enabled}, "Auto-trader", $("auto-msg"));  // exits unchanged
   });
   $("auto-save").addEventListener("click", async () => {
+    const exits = readExits($("auto-tp"), $("auto-sl"));
+    if (exits.error) { $("auto-msg").textContent = exits.error; $("auto-msg").className = "form-msg err"; return; }
     $("auto-save").disabled = true;
-    const ok = await act("BOT_SETTINGS", {enabled: autoCurrent().enabled, take_profit: $("auto-tp").value, stop_loss: $("auto-sl").value}, "Auto-trader exits", $("auto-msg"));
+    const ok = await act("BOT_SETTINGS", {take_profit: exits.tp, stop_loss: exits.sl}, "Auto-trader exits", $("auto-msg"));
     if (ok) autoDirty = false;
+  });
+
+  // ---------- maintenance ----------
+  async function runCheck() {
+    const btn = $("run-check"), list = $("checks");
+    if (SNAP) { list.innerHTML = `<li class="warn"><span class="i">!</span><span>Open the live dashboard to run the check.</span></li>`; return; }
+    btn.disabled = true; btn.textContent = "Checking…";
+    try {
+      const res = await fetch("api/health", {cache: "no-store"});
+      const checks = await res.json();
+      const icon = {ok: "✓", warn: "!", fail: "✗"}, word = {ok: "OK", warn: "Check", fail: "Problem"};
+      list.innerHTML = checks.map((c) => `<li class="${esc(c.status)}"><span class="i" aria-label="${word[c.status]}">${icon[c.status]}</span>` +
+        `<span><b>${esc(c.name)}</b> · ${esc(c.detail)}</span></li>`).join("");
+    } catch {
+      list.innerHTML = `<li class="fail"><span class="i">✗</span><span>Couldn't reach the dashboard server.</span></li>`;
+    }
+    btn.disabled = false; btn.textContent = "Run system check again";
+  }
+  $("run-check").addEventListener("click", runCheck);
+  $("clear-pending").addEventListener("click", async () => {
+    const msg = $("fix-msg"), key = $("key").value.trim() || store.get();
+    try {
+      const res = await fetch("api/command", {method: "POST", headers: {"Content-Type": "application/json", "X-Dashboard-Key": key}, body: JSON.stringify({kind: "CLEAR_PENDING"})});
+      const out = await res.json();
+      if (res.status === 401) { $("key-field").hidden = false; msg.textContent = "Enter the dashboard key in the Paper trade box first."; msg.className = "form-msg err"; return; }
+      // actions already in flight resolve from their real status on the next refresh
+      msg.textContent = out.message || out.error; msg.className = "form-msg " + (res.ok ? "ok" : "err");
+    } catch { msg.textContent = "Couldn't reach the dashboard server."; msg.className = "form-msg err"; }
+  });
+  $("restart-bot").addEventListener("click", async () => {
+    $("restart-bot").disabled = true;
+    await act("RESTART_BOT", {}, "Restart", $("fix-msg"));
+    $("restart-bot").disabled = false;
+  });
+  $("reset-confirm").addEventListener("input", () => { $("reset-account").disabled = $("reset-confirm").value.trim() !== "RESET"; });
+  $("reset-account").addEventListener("click", async () => {
+    $("reset-account").disabled = true;
+    const ok = await act("RESET_ACCOUNT", {confirm: $("reset-confirm").value.trim()}, "Reset", $("reset-msg"));
+    if (ok) { $("reset-confirm").value = ""; for (const id of Object.keys(editing)) delete editing[id]; }
+    else $("reset-account").disabled = $("reset-confirm").value.trim() !== "RESET";
   });
 
   function niceTicks(lo, hi, n) {
@@ -864,6 +1001,7 @@
         data = await res.json();
       }
       last = data; lastOk = Date.now();
+      if (!SNAP) clockSkewMs = data.now * 1000 - Date.now();
       TZ = data.rules.timezone || TZ;
       resolveCommands(data.commands);
       renderBot(data.bot); renderRound(data); renderTiles(data); renderWallet(data); renderPositions(data);

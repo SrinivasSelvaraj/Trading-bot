@@ -11,13 +11,13 @@ from __future__ import annotations
 import json
 
 from config import load_config
-from dashboard import INDEX_HTML, MAX_BODY_BYTES, build_state, submit_command
+from dashboard import INDEX_HTML, MAX_BODY_BYTES, build_state, health, submit_command
 
 _cfg = load_config()
 
 _COMMON_HEADERS = [("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff")]
 _REASONS = {200: "OK", 202: "Accepted", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
-            405: "Method Not Allowed", 413: "Payload Too Large"}
+            405: "Method Not Allowed", 413: "Payload Too Large", 503: "Service Unavailable"}
 
 
 def application(environ, start_response):
@@ -35,6 +35,8 @@ def application(environ, start_response):
         code, ctype, body = 200, "text/html; charset=utf-8", INDEX_HTML.read_bytes()
     elif path == "/api/state":
         code, ctype, body = 200, "application/json", json.dumps(build_state(_cfg)).encode("utf-8")
+    elif path == "/api/health":
+        code, ctype, body = 200, "application/json", json.dumps(health(_cfg)).encode("utf-8")
     elif path == "/healthz":
         code, body = 200, b"ok"
     start_response(f"{code} {_REASONS.get(code, '')}",

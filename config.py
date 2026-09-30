@@ -57,7 +57,8 @@ class Config:
     max_stake_inr: float = 1100.0      # hard ceiling; anything above is rejected
     max_daily_loss_inr: float = 5000.0
     starting_balance_inr: float = 100000.0  # paper wallet; trades need free balance like a real account
-    max_manual_order_inr: float = 25000.0   # cap per manual order from the dashboard (fat-finger guard)
+    max_manual_order_inr: float = 100000.0  # cap per manual order from the dashboard (fat-finger guard)
+    max_manual_daily_loss_inr: float = 50000.0  # manual trading stops for the day at this loss; 0 = no limit
     inr_per_usd: float = 96.0          # Polymarket settles in USDC; used to convert ₹ <-> $
 
     # --- Execution realism (paper fills) -----------------------------------
@@ -102,6 +103,8 @@ class Config:
             raise ConfigError("STARTING_BALANCE_INR must cover at least one stake")
         if self.max_manual_order_inr <= 0:
             raise ConfigError("MAX_MANUAL_ORDER_INR must be positive")
+        if self.max_manual_daily_loss_inr < 0:
+            raise ConfigError("MAX_MANUAL_DAILY_LOSS_INR cannot be negative (0 turns it off)")
         if self.inr_per_usd <= 0:
             raise ConfigError("INR_PER_USD must be positive")
         if not 0 < self.max_entry_price < 1:
@@ -124,7 +127,8 @@ def load_config(env_file: Path | None = None) -> Config:
         max_stake_inr=_float("MAX_STAKE_INR", 1100.0),
         max_daily_loss_inr=_float("MAX_DAILY_LOSS_INR", 5000.0),
         starting_balance_inr=_float("STARTING_BALANCE_INR", 100000.0),
-        max_manual_order_inr=_float("MAX_MANUAL_ORDER_INR", 25000.0),
+        max_manual_order_inr=_float("MAX_MANUAL_ORDER_INR", 100000.0),
+        max_manual_daily_loss_inr=_float("MAX_MANUAL_DAILY_LOSS_INR", 50000.0),
         inr_per_usd=_float("INR_PER_USD", 96.0),
         max_entry_price=_float("MAX_ENTRY_PRICE", 0.99),
         taker_fee_rate=_float("TAKER_FEE_RATE", 0.07),

@@ -26,7 +26,7 @@ from config import Config, ConfigError, load_config
 from logger import TradeStore, setup_logging, utc_iso
 from market_detector import MarketDetector, MarketVerificationError, Round, round_start_ts
 from polymarket_api import ApiError, PolymarketClient
-from paper_account import BOT, MANUAL, SIDES, SOLD, UNRESOLVED, Books, PaperAccount, validate_exits
+from paper_account import BOT, MANUAL, SIDES, SOLD, UNRESOLVED, Books, PaperAccount, signed_inr, validate_exits
 from quotes import Book, displayed_probability, parse_book, simulate_buy, to_pct, with_complement_asks
 from risk_manager import RiskManager
 from strategy import CONFLICT, INVALID, NO_TRADE, THRESHOLD_PCT, TRADE_DECISIONS, get_decision
@@ -39,6 +39,7 @@ LIVE_NOT_AVAILABLE = (
     "have been reviewed (see README)."
 )
 SETTLE_EVERY_SECONDS = 15
+EXIT_RESTART = 3  # Bot.run() return code: rebuild the bot and carry on (dashboard "Restart bot")
 GIVE_UP_SETTLING_AFTER_SECONDS = 24 * 3600
 
 # fill_status values
@@ -128,6 +129,7 @@ class Bot:
         self.state: RoundState | None = None
         self._last_settle = 0.0
         self._last_error = ""
+        self._restart = False
 
     # --- lifecycle -------------------------------------------------------------
     def run(self) -> int:
@@ -150,13 +152,16 @@ class Bot:
                     log.warning("EMERGENCY STOP detected (%s). Stopping.", self.cfg.stop_file)
                     break
                 self.tick()
+                if self._restart:
+                    log.warning("Restarting the bot (requested from the dashboard).")
+                    return EXIT_RESTART
                 self.sleep(self.cfg.poll_seconds)
         except KeyboardInterrupt:
             log.warning("Stopped by user (Ctrl+C).")
         finally:
             if self.state:
                 self.store.upsert_round(self.state.row())
-            if self.browser:
+            if self.browser and not self._restart:
                 self.browser.close()
         return 0
 
@@ -180,15 +185,16 @@ class Bot:
                 self.browser.open(rnd.url)
 
         st = self.state
+        # raw: this poll's order books, fresh but not necessarily consistent with each other
         raw = self._read_books(st.rnd, now) if st.rnd.seconds_left(now) > 0 else None
-        # positions are only valued, exited or traded on readings that pass the checks
-        books = raw if raw is not None and self._consistent(raw) else None
-        st.quote = books.quote() if books else None
-        if books is not None:
-            for event in self.account.update_marks_and_exits(st.rnd.slug, books, self._iso(now)):
+        st.quote = raw.quote() if raw else None
+        # valuations and take profit / stop loss only act on prices that pass the consistency check
+        if raw is not None and self._consistent(raw):
+            for event in self.account.update_marks_and_exits(st.rnd.slug, raw, self._iso(now)):
                 log.info("[%s] %s", st.rnd.slug, event)
-        self._process_commands(st, books, now)
-        if raw is not None:
+        # manual orders fill against the real book, so fresh books are enough for them
+        self._process_commands(st, raw, now)
+        if self.state is st and raw is not None:  # a reset or restart drops the round state
             self._evaluate(st, now, raw)
         self._write_status(now)
 
@@ -220,7 +226,9 @@ class Bot:
             "poll_seconds": self.cfg.poll_seconds,
             "stake_inr": self.cfg.stake_inr,
             "max_daily_loss_inr": self.cfg.max_daily_loss_inr,
-            "realized_today_inr": self.risk.realized_today_inr(now),
+            "realized_today_inr": self.risk.realized_today_inr(now, BOT),
+            "manual_realized_today_inr": self.risk.realized_today_inr(now, MANUAL),
+            "max_manual_daily_loss_inr": self.cfg.max_manual_daily_loss_inr,
             "round": None if st is None else {
                 **st.row(),
                 "url": st.rnd.url,
@@ -338,6 +346,10 @@ class Bot:
             return
 
         fill = self.account.quote_buy(books, decision, self.cfg.stake_inr)
+        if fill.filled and self.cfg.stake_inr + fill.fee_usd * self.cfg.inr_per_usd > self.risk.cash_inr():
+            st.fill_status, st.reason = BLOCKED, "not enough paper balance for the stake plus fee"
+            st.note(logging.WARNING, f"{decision} signal but not trading: {st.reason}")
+            return
         if not fill.filled:
             st.fill_status, st.reason = NO_FILL, fill.reason
             st.note(logging.INFO, f"{decision} signal, no paper fill: {fill.reason} (will keep trying)")
@@ -435,10 +447,10 @@ class Bot:
         now = self.clock()
         for pos in self.account.settle(row["slug"], result, self._iso(now)):
             log.info(
-                "[%s] RESULT %s | %s #%s %s -> %s | P/L ₹%s | today ₹%s",
+                "[%s] RESULT %s | %s #%s %s -> %s | P/L %s | %s today %s",
                 row["slug"], result, pos["source"], pos["id"], pos["side"],
-                "WIN" if pos["side"] == result else "LOSS", f"{pos['pnl_inr']:,.2f}",
-                f"{self.risk.realized_today_inr(now):,.2f}",
+                "WIN" if pos["side"] == result else "LOSS", signed_inr(pos["pnl_inr"]),
+                pos["source"], signed_inr(self.risk.realized_today_inr(now, pos["source"])),
             )
         # the round's P/L is the bot's own position, however it ended (resolution, stop loss, ...)
         bot_pos = self.store.bot_position(row["slug"])
@@ -451,18 +463,23 @@ class Bot:
     # --- dashboard commands ------------------------------------------------------------
     def _process_commands(self, st: RoundState | None, books: Books | None, now: float) -> None:
         for cmd in self.store.pending_commands():
+            if not self.store.claim_command(cmd["id"]):
+                continue  # already taken: never run an action twice
             if now - cmd["created_at"] > self.cfg.command_max_age_seconds:
                 ok, msg = False, "Expired before the bot could run it; nothing was done"
             else:
                 try:
-                    ok, msg = self._run_command(cmd["kind"], cmd["payload"], st, books, now)
+                    ok, msg = self._run_command(cmd, st, books, now)
                 except (KeyError, TypeError, ValueError) as exc:
                     ok, msg = False, f"Bad request ({exc})"
             self.store.finish_command(cmd["id"], ok, msg, now)
             log.info("Dashboard %s #%s %s: %s", cmd["kind"], cmd["id"], "done" if ok else "refused", msg)
+            if self.state is not st or self._restart:
+                break  # reset or restart: later commands run on the next poll, against fresh state
 
-    def _run_command(self, kind: str, p: dict, st: RoundState | None, books: Books | None,
+    def _run_command(self, cmd: dict, st: RoundState | None, books: Books | None,
                      now: float) -> tuple[bool, str]:
+        kind, p = cmd["kind"], cmd["payload"]
         cents = lambda v: None if v in (None, "") else float(v) / 100  # noqa: E731 - UI sends prices in ¢
         live = st is not None and books is not None and st.rnd.seconds_left(now) > 0
 
@@ -475,17 +492,25 @@ class Bot:
             if problem:
                 return False, problem
             if not live:
-                return False, "No reliable live prices right now; try again in a few seconds"
+                return False, "No live order book right now; try again in a few seconds"
             if st.rnd.seconds_left(now) <= self.cfg.no_trade_last_seconds:
                 return False, "The round is about to close; wait for the next one"
             if not st.rnd.accepting_orders:
                 return False, "This market is not accepting orders"
+            problem = self._exits_vs_market(tp, sl, side, books)
+            if problem:
+                return False, problem
             risk = self.risk.check_manual(amount, now)
             if not risk.allowed:
                 return False, risk.reason[:1].upper() + risk.reason[1:]
             fill = self.account.quote_buy(books, side, amount)
             if not fill.filled:
                 return False, f"Not filled: {fill.reason}"
+            fee_inr = fill.fee_usd * self.cfg.inr_per_usd
+            cash = self.risk.cash_inr()
+            if amount + fee_inr > cash:
+                return False, (f"Not enough paper balance for ₹{amount:,.0f} plus the ₹{fee_inr:,.2f} fee "
+                               f"(₹{cash:,.2f} free)")
             pos_id = self.account.record_open(
                 source=MANUAL, rnd=st.rnd, side=side, fill=fill, amount_inr=amount,
                 take_profit=tp, stop_loss=sl, mode=self.mode, now_iso=self._iso(now), books=books,
@@ -502,21 +527,62 @@ class Bot:
             return ok, (msg[:1].upper() + msg[1:]) if ok else f"Could not sell: {msg}"
 
         if kind == "SET_EXITS":
-            return self.account.set_exits(int(p["position_id"]), cents(p.get("take_profit")), cents(p.get("stop_loss")))
+            pos = self.store.get_position(int(p["position_id"]))
+            tp, sl = cents(p.get("take_profit")), cents(p.get("stop_loss"))
+            if pos is not None and live and pos["slug"] == st.rnd.slug:
+                problem = validate_exits(tp, sl) or self._exits_vs_market(tp, sl, pos["side"], books)
+                if problem:
+                    return False, problem
+            return self.account.set_exits(int(p["position_id"]), tp, sl)
 
         if kind == "BOT_SETTINGS":
-            tp, sl = cents(p.get("take_profit")), cents(p.get("stop_loss"))
-            problem = validate_exits(tp, sl)
+            # a field left out (None) keeps its saved value, so Pause/Resume never trips over old exits
+            current = self.bot_settings()
+            tp = current["take_profit"] if p.get("take_profit") is None else cents(p["take_profit"])
+            sl = current["stop_loss"] if p.get("stop_loss") is None else cents(p["stop_loss"])
+            changing = p.get("take_profit") is not None or p.get("stop_loss") is not None
+            problem = validate_exits(tp, sl) if changing else ""
+            if not problem and changing and tp is not None and tp <= THRESHOLD_PCT / 100:
+                problem = (f"The auto-trader buys at {THRESHOLD_PCT:.0f}–99¢, so a take profit at or below "
+                           f"{THRESHOLD_PCT:.0f}¢ would sell at a loss straight away. Use 99¢ or leave it off")
+            if not problem and changing and sl is not None and sl >= THRESHOLD_PCT / 100:
+                problem = f"The auto-trader buys at {THRESHOLD_PCT:.0f}–99¢, so its stop loss must be below {THRESHOLD_PCT:.0f}¢"
             if problem:
                 return False, problem
-            enabled = bool(p["enabled"])
+            enabled = current["enabled"] if p.get("enabled") is None else bool(p["enabled"])
             self.store.set_setting("bot_enabled", "1" if enabled else "0")
             self.store.set_setting("bot_take_profit", "" if tp is None else str(tp))
             self.store.set_setting("bot_stop_loss", "" if sl is None else str(sl))
             fmt = lambda v: "off" if v is None else f"{v * 100:g}¢"  # noqa: E731
             return True, f"Auto-trader {'on' if enabled else 'paused'} · take profit {fmt(tp)} · stop loss {fmt(sl)}"
 
+        if kind == "RESET_ACCOUNT":
+            if p.get("confirm") != "RESET":
+                return False, "Type RESET to confirm"
+            archived = self.store.reset_all(keep_command_id=cmd["id"])
+            self.risk.forget_traded()
+            self.state = None  # the current round is re-read, and re-recorded, on the next poll
+            note = f"; old trades.csv kept as {archived}" if archived else ""
+            log.warning("Paper account reset from the dashboard%s", note)
+            return True, f"Paper account reset to ₹{self.cfg.starting_balance_inr:,.0f}{note}"
+
+        if kind == "RESTART_BOT":
+            self._restart = True
+            return True, "Bot restarting; it will be back within a few seconds"
+
         return False, f"Unknown action {kind!r}"
+
+    @staticmethod
+    def _exits_vs_market(tp: float | None, sl: float | None, side: str, books: Books) -> str:
+        """Refuse exits that would fire the moment they're set (almost always a typo)."""
+        bid, price = books.sell_book(side).best_bid, books.price(side)
+        if tp is not None and bid is not None and tp <= bid:
+            return (f"Take profit {tp * 100:g}¢ is at or below what buyers pay now ({bid * 100:g}¢), so it would "
+                    f"sell straight away. Set it above {bid * 100:g}¢")
+        if sl is not None and price is not None and sl >= price:
+            return (f"Stop loss {sl * 100:g}¢ is at or above the current price ({price * 100:.1f}¢), so it would "
+                    f"sell straight away. Set it below {price * 100:.1f}¢")
+        return ""
 
     def _warn_once(self, msg: str) -> None:
         if msg != self._last_error:
@@ -600,9 +666,11 @@ def main(argv: list[str] | None = None) -> int:
             if cfg.browser_crosscheck:
                 return 1
             browser = None
-    bot = Bot(cfg, client, MarketDetector(client), store, RiskManager(cfg, store), browser)
     try:
-        return bot.run()
+        while True:
+            code = Bot(cfg, client, MarketDetector(client), store, RiskManager(cfg, store), browser).run()
+            if code != EXIT_RESTART:
+                return code
     finally:
         store.close()
 

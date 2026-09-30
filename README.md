@@ -110,7 +110,8 @@ The displayed 98% is the market's price, not a guarantee. The rule only makes mo
 | `MAX_STAKE_INR` | `1100` | hard ceiling |
 | `MAX_DAILY_LOSS_INR` | `5000` | stop trading for the day when reached |
 | `STARTING_BALANCE_INR` | `100000` | paper wallet; a trade needs this much free balance |
-| `MAX_MANUAL_ORDER_INR` | `25000` | largest single order from the dashboard |
+| `MAX_MANUAL_ORDER_INR` | `100000` | largest single order from the dashboard |
+| `MAX_MANUAL_DAILY_LOSS_INR` | `50000` | manual trading stops for the day at this loss (0 = no limit) |
 | `DASHBOARD_KEY` | *(empty)* | if set, dashboard buttons need this key; set it for any shared URL |
 | `INR_PER_USD` | `96` | conversion for stake and P/L; update occasionally |
 | `MAX_ENTRY_PRICE` | `0.99` | never pay more than this per share |
@@ -142,6 +143,13 @@ How the simulation matches a real account:
 - **Take profit** fires when the best bid reaches your price. **Stop loss** fires when the displayed price falls to your price and then sells at the bids, so it can fill below the stop in a fast market, like a real stop order.
 - Anything still open when a round ends is paid out at resolution: ₹ equivalent of 1 USDC per share if its side won, 0 if it lost.
 - A trade needs free balance; the daily loss limit and emergency stop apply to manual orders too.
+
+**Maintenance** (bottom of the page):
+- **System check** checks the bot's heartbeat, market data, stuck actions, unpaid rounds, the auto-trader's records, the wallet, both daily loss limits and Polymarket access, and says what to do about anything wrong. Same check from a terminal: `python health.py` (or `python health.py --url https://your-app.herokuapp.com` for a deployed app).
+- **Clear stuck orders** cancels actions the bot hasn't picked up. **Restart bot** restarts the trading loop (needs the bot to be responding; otherwise restart the app).
+- **Reset paper account** (type RESET) wipes all trades, rounds and settings and starts again with the starting balance; the old trades.csv is kept under a new name.
+
+If an order won't go through, the Paper trade box says why (bot offline, round closing, no order book, over the limit, not enough cash for amount + fee, exit price that would fire immediately). The auto-trader and manual trading have separate daily loss limits (`MAX_DAILY_LOSS_INR`, `MAX_MANUAL_DAILY_LOSS_INR`), so a big manual trade never blocks the auto-trader.
 
 Buttons never execute in the browser or the web server. They queue a command that the bot runs on its next poll (within ~2 s) against the live book, with the same checks as its own trades; commands older than 30 s are refused rather than run late. If `DASHBOARD_KEY` is set, the page asks for it before the first action (and remembers it in that browser).
 
@@ -216,10 +224,13 @@ The data the bot acts on comes from Polymarket's own API, which is the same sour
 - Check that Polymarket is available to you. Trading is geo-restricted in some countries, and you must follow Polymarket's terms and your local laws.
 - Live execution would need Polymarket's order API (`py-clob-client`), a funded wallet and API keys. It should reuse exactly the same checks above. It is deliberately not part of this version.
 
-## Tests
+## Tests and routine checks
 
 ```bash
-python -m pytest
+python -m pytest          # offline test suite
+python health.py          # system check of a running setup
 ```
+
+GitHub Actions (`.github/workflows/checks.yml`) runs the test suite on every push, and every day at 08:00 IST also reads the live Polymarket market (`python bot.py --check`) and runs the system check of the deployed app. For the last one, set the repository variable `APP_URL` (Settings → Secrets and variables → Actions → Variables) to the app's address.
 
 The tests are offline and cover the rule table, market verification, fills and fees, duplicate protection, the daily loss limit, emergency stop, CONFLICT, stale data and restart safety.

@@ -3,9 +3,10 @@
 - Emergency stop: a file named STOP next to the bot (create it with `python bot.py --stop`).
 - Fixed stake: anything other than a positive amount <= MAX_STAKE_INR is refused.
 - Duplicate protection: one order per round, checked in memory and in the database.
-- Daily loss limit: a bot trade is refused if losing it could take today's realized loss,
-  plus money in open positions, past MAX_DAILY_LOSS_INR. Manual orders are refused once
-  today's realized loss has reached the limit.
+- Daily loss limits, kept separate so one can't block the other:
+  - auto-trader: a bot trade is refused if losing it could take the bot's realized loss today,
+    plus the bot's money in open positions, past MAX_DAILY_LOSS_INR
+  - manual: orders are refused once today's realized manual loss reaches MAX_MANUAL_DAILY_LOSS_INR
 - Paper balance: no trade the wallet can't pay for.
 """
 from __future__ import annotations
@@ -16,6 +17,16 @@ from zoneinfo import ZoneInfo
 
 from config import Config
 from logger import TradeStore, utc_iso
+
+BOT, MANUAL = "BOT", "MANUAL"
+
+
+def day_bounds_utc(tz_name: str, now_ts: float) -> tuple[str, str]:
+    """[start, end) of the local calendar day containing now_ts, as UTC ISO strings."""
+    tz = ZoneInfo(tz_name)
+    start = datetime.combine(datetime.fromtimestamp(now_ts, tz=tz).date(), time.min, tzinfo=tz)
+    end = start + timedelta(days=1)
+    return utc_iso(start.astimezone(timezone.utc)), utc_iso(end.astimezone(timezone.utc))
 
 
 @dataclass(frozen=True)
@@ -40,16 +51,18 @@ class RiskManager:
 
     # --- daily loss ---------------------------------------------------------
     def day_bounds_utc(self, now_ts: float) -> tuple[str, str]:
-        local_day = datetime.fromtimestamp(now_ts, tz=self.tz).date()
-        start = datetime.combine(local_day, time.min, tzinfo=self.tz)
-        end = start + timedelta(days=1)
-        return utc_iso(start.astimezone(timezone.utc)), utc_iso(end.astimezone(timezone.utc))
+        return day_bounds_utc(self.cfg.timezone, now_ts)
 
-    def realized_today_inr(self, now_ts: float) -> float:
-        return self.store.realized_pnl_inr(*self.day_bounds_utc(now_ts))
+    def realized_today_inr(self, now_ts: float, source: str | None = None) -> float:
+        return self.store.realized_pnl_inr(*self.day_bounds_utc(now_ts), source=source)
 
     def daily_limit_reached(self, now_ts: float) -> bool:
-        return self.realized_today_inr(now_ts) <= -self.cfg.max_daily_loss_inr
+        """The auto-trader's own limit."""
+        return self.realized_today_inr(now_ts, BOT) <= -self.cfg.max_daily_loss_inr
+
+    def manual_limit_reached(self, now_ts: float) -> bool:
+        limit = self.cfg.max_manual_daily_loss_inr
+        return bool(limit) and self.realized_today_inr(now_ts, MANUAL) <= -limit
 
     # --- paper wallet ------------------------------------------------------------
     def cash_inr(self) -> float:
@@ -71,10 +84,10 @@ class RiskManager:
         if stake_inr > cash:
             return RiskDecision(False, f"not enough paper balance (₹{cash:,.2f} free, stake ₹{stake_inr:,.2f})")
 
-        realized = self.realized_today_inr(now_ts)
+        realized = self.realized_today_inr(now_ts, BOT)
         if realized <= -self.cfg.max_daily_loss_inr:
-            return RiskDecision(False, f"daily loss limit reached (₹{realized:,.2f} today)")
-        worst_case = realized - self.store.open_exposure_inr() - stake_inr
+            return RiskDecision(False, f"auto-trader daily loss limit reached (₹{realized:,.2f} today)")
+        worst_case = realized - self.store.open_exposure_inr(BOT) - stake_inr
         if worst_case < -self.cfg.max_daily_loss_inr:
             return RiskDecision(
                 False,
@@ -93,10 +106,15 @@ class RiskManager:
         cash = self.cash_inr()
         if amount_inr > cash:
             return RiskDecision(False, f"not enough paper balance (₹{cash:,.2f} free)")
-        realized = self.realized_today_inr(now_ts)
-        if realized <= -self.cfg.max_daily_loss_inr:
-            return RiskDecision(False, f"daily loss limit reached (₹{realized:,.2f} today)")
+        if self.manual_limit_reached(now_ts):
+            return RiskDecision(False, f"manual daily loss limit of ₹{self.cfg.max_manual_daily_loss_inr:,.0f} "
+                                       f"reached (₹{self.realized_today_inr(now_ts, MANUAL):,.2f} today); "
+                                       "trading reopens tomorrow or after a reset")
         return RiskDecision(True, "ok")
 
     def mark_traded(self, slug: str) -> None:
         self._traded_slugs.add(slug)
+
+    def forget_traded(self) -> None:
+        """After a full account reset the database no longer has those rounds."""
+        self._traded_slugs.clear()

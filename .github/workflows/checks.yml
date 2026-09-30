@@ -1,0 +1,51 @@
+# Routine checks for the paper-trading bot.
+#  - every push and pull request: the full offline test suite
+#  - every day at 08:00 IST (and on demand): tests, a live read of the Polymarket BTC 5m market,
+#    and the system check of the deployed dashboard
+name: checks
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "30 2 * * *"   # 02:30 UTC = 08:00 IST
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q
+
+  live-market:
+    # Catches Polymarket API or market-format changes that would stop the bot from trading.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Read the live BTC 5-minute round
+        run: python bot.py --check
+
+  deployed-app:
+    # Runs the dashboard's System check on the deployed app. Set the repository variable APP_URL
+    # (Settings > Secrets and variables > Actions > Variables) to your app's address.
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && vars.APP_URL != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: System check of the deployed dashboard
+        run: python health.py --url "${{ vars.APP_URL }}"

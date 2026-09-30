@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from config import BASE_DIR, Config, load_config
+from health import run_checks
 from logger import TradeStore, utc_iso
 from paper_account import SIDES, wallet_summary
 from report import load_rounds, summarize
@@ -44,7 +45,12 @@ COMMAND_FIELDS = {
     "SELL": {"position_id"},
     "SET_EXITS": {"position_id", "take_profit", "stop_loss"},
     "BOT_SETTINGS": {"enabled", "take_profit", "stop_loss"},
+    "RESET_ACCOUNT": {"confirm"},
+    "RESTART_BOT": set(),
+    "CLEAR_PENDING": set(),  # handled here, not by the bot, so it works even when the bot is stuck
 }
+HEALTH_CACHE_SECONDS = 10
+_health_cache: dict = {"at": 0.0, "result": None}
 
 
 def _query(db_path: Path, sql: str, args: tuple = ()) -> list[dict]:
@@ -140,12 +146,27 @@ def submit_command(cfg: Config, body: bytes, key: str) -> tuple[int, dict]:
             return 400, {"error": f"Bad value for {k}"}
     if kind == "BUY" and payload["side"] not in SIDES:
         return 400, {"error": "Side must be UP or DOWN"}
-    store = TradeStore(cfg.db_path, cfg.csv_path)
+    if not Path(cfg.db_path).exists():
+        return 503, {"error": "The bot hasn't started yet (no database). Start the bot, then try again."}
+    store = TradeStore(cfg.db_path, cfg.csv_path, migrate=False)  # schema changes are the bot's job
     try:
+        if kind == "CLEAR_PENDING":
+            n = store.clear_pending_commands(time.time())
+            return 200, {"cleared": n, "message": f"Cleared {n} waiting action(s)" if n else "Nothing was waiting"}
         cmd_id = store.enqueue_command(kind, payload, time.time())
+    except sqlite3.OperationalError as exc:
+        return 503, {"error": f"The database isn't ready ({exc}). Restart the bot, then try again."}
     finally:
         store.close()
     return 202, {"id": cmd_id, "status": "PENDING"}
+
+
+def health(cfg: Config) -> list[dict]:
+    """System check for the dashboard, cached briefly because it calls Polymarket."""
+    now = time.time()
+    if _health_cache["result"] is None or now - _health_cache["at"] > HEALTH_CACHE_SECONDS:
+        _health_cache.update(at=now, result=run_checks(cfg, live=True, now=now))
+    return _health_cache["result"]
 
 
 def make_handler(cfg: Config):
@@ -168,6 +189,8 @@ def make_handler(cfg: Config):
                 self._send(HTTPStatus.OK, INDEX_HTML.read_bytes(), "text/html; charset=utf-8")
             elif path == "/api/state":
                 self._send(HTTPStatus.OK, json.dumps(build_state(cfg)).encode("utf-8"), "application/json")
+            elif path == "/api/health":
+                self._send(HTTPStatus.OK, json.dumps(health(cfg)).encode("utf-8"), "application/json")
             elif path == "/healthz":
                 self._send(HTTPStatus.OK, b"ok", "text/plain")
             else:

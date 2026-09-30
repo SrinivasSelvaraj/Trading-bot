@@ -457,7 +457,22 @@ def test_daily_loss_limit_and_worst_case(tmp_path):
     assert risk.check_manual(1000, now).allowed  # manual orders stop only once the limit is actually hit
     add_position(store, slug="l4", round_start="2026-09-30T18:05:00+00:00", status="SETTLED", pnl_inr=-1100.0)
     assert risk.daily_limit_reached(now)
-    assert "daily loss" in risk.check_manual(1000, now).reason
+    assert risk.check_manual(1000, now).allowed  # the auto-trader's limit doesn't block manual trading
+    store.close()
+
+
+def test_manual_positions_do_not_block_the_auto_trader_and_have_their_own_limit(tmp_path):
+    cfg = Config(db_path=tmp_path / "t.db", csv_path=tmp_path / "t.csv", stop_file=tmp_path / "STOP",
+                 timezone="UTC", max_manual_daily_loss_inr=20000)
+    store = TradeStore(cfg.db_path, cfg.csv_path)
+    risk = RiskManager(cfg, store)
+    now = START + 100
+    add_position(store, source="MANUAL", slug="m1", stake_inr=25000.0, stake_usd=250.0, shares=300.0)  # open
+    assert risk.check_trade("bot-round", 1100, now).allowed  # seen live: a big manual trade blocked the bot
+    add_position(store, source="MANUAL", slug="m2", status="SETTLED", pnl_inr=-20000.0)
+    decision = risk.check_manual(1000, now)
+    assert not decision.allowed and "manual daily loss limit" in decision.reason
+    assert risk.check_trade("bot-round", 1100, now).allowed
     store.close()
 
 
@@ -549,7 +564,7 @@ def test_sell_now_and_edit_exits(env):
 def test_manual_orders_are_checked(env):
     cfg, client, store, clock, bot = env
     set_books(client, 0.59, 0.60, 0.40, 0.41)
-    assert "per-order limit" in command(bot, store, clock, "BUY", side="UP", amount_inr=30000)[1]
+    assert "per-order limit" in command(bot, store, clock, "BUY", side="UP", amount_inr=150000)[1]
     assert command(bot, store, clock, "BUY", side="SIDEWAYS", amount_inr=100)[0] == "FAILED"
     assert "between 1" in command(bot, store, clock, "BUY", side="UP", amount_inr=100, take_profit=120)[1]
     old = store.enqueue_command("BUY", {"side": "UP", "amount_inr": 100}, clock.t - 60)
@@ -620,3 +635,121 @@ def test_position_left_open_by_an_already_settled_round_is_paid_out(env):
     pos = store.get_position(pos_id)
     assert (pos["status"], pos["result"]) == ("SETTLED", "DOWN")
     assert pos["pnl_inr"] == pytest.approx((11.0 / 0.99 - 11.0) * 100, abs=0.01)
+
+
+def test_exits_that_would_fire_immediately_are_refused(env):
+    cfg, client, store, clock, bot = env
+    set_books(client, 0.59, 0.60, 0.40, 0.41)  # UP: bid 59c, price 59.5c
+    status, msg = command(bot, store, clock, "BUY", side="UP", amount_inr=1000, take_profit=55)
+    assert status == "FAILED" and "sell straight away" in msg
+    status, msg = command(bot, store, clock, "BUY", side="UP", amount_inr=1000, stop_loss=65)
+    assert status == "FAILED" and "Stop loss" in msg
+    assert command(bot, store, clock, "BUY", side="UP", amount_inr=1000, take_profit=70, stop_loss=40)[0] == "DONE"
+    (pos,) = store.open_positions()
+    assert "sell straight away" in command(bot, store, clock, "SET_EXITS", position_id=pos["id"], take_profit=50)[1]
+    status, msg = command(bot, store, clock, "BOT_SETTINGS", enabled=True, take_profit=1, stop_loss="")
+    assert status == "FAILED" and "auto-trader" in msg  # seen live: a 1c bot take profit
+
+
+def test_manual_orders_work_when_displayed_prices_disagree(env):
+    cfg, client, store, clock, bot = env
+    # UP shows 99% (one-sided book, last trade) and DOWN 10%: 109% fails the consistency check,
+    # but there is a real ask for DOWN, so a manual order can still fill.
+    client.books["111"] = raw_book([(0.99, 1000)], [], last="0.99")
+    client.books["222"] = raw_book([(0.08, 1000)], [(0.12, 1000)], last="0.10")
+    status, msg = command(bot, store, clock, "BUY", side="DOWN", amount_inr=500)
+    assert status == "DONE", msg
+    assert not store.has_order(slug_for(START))  # the 98% rule still refuses to act on these prices
+
+
+def test_reset_account_and_restart(env):
+    cfg, client, store, clock, bot = env
+    set_books(client, 0.97, 0.99, 0.01, 0.03)
+    bot.tick()  # bot trade
+    command(bot, store, clock, "BUY", side="DOWN", amount_inr=1000)
+    store.set_setting("bot_enabled", "0")
+    assert command(bot, store, clock, "RESET_ACCOUNT", confirm="nope")[0] == "FAILED"
+    status, msg = command(bot, store, clock, "RESET_ACCOUNT", confirm="RESET")
+    assert status == "DONE", msg
+    for table in ("positions", "orders", "settings"):
+        assert store.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    assert store.conn.execute("SELECT COUNT(*) FROM commands").fetchone()[0] == 1  # the reset itself
+    assert RiskManager(cfg, store).cash_inr() == cfg.starting_balance_inr
+    clock.t += 2
+    bot.tick()  # round re-read; 98% still showing, so the bot trades this round again after the reset
+    assert store.has_order(slug_for(START))
+    assert command(bot, store, clock, "RESTART_BOT")[0] == "DONE" and bot._restart
+
+
+def test_clear_pending_commands(tmp_path):
+    store = TradeStore(tmp_path / "t.db", tmp_path / "t.csv")
+    store.enqueue_command("BUY", {"side": "UP"}, 1.0)
+    assert store.clear_pending_commands(2.0) == 1 and store.pending_commands() == []
+    store.close()
+
+
+def test_health_check_reports_problems(env):
+    from health import FAIL, OK, WARN, run_checks
+
+    cfg, client, store, clock, bot = env
+    set_books(client, 0.97, 0.99, 0.01, 0.03)
+    bot.tick()  # bot trade + heartbeat
+    by_name = {c["name"]: c for c in run_checks(cfg, live=False, now=clock.t + 1)}
+    assert by_name["Bot running"]["status"] == OK
+    assert by_name["Auto-trader records"]["status"] == OK
+    assert by_name["Wallet"]["status"] == OK
+
+    stale = {c["name"]: c for c in run_checks(cfg, live=False, now=clock.t + 3600)}
+    assert stale["Bot running"]["status"] == FAIL
+    assert stale["Settlement"]["status"] == WARN  # round ended an hour ago, position still open
+
+    with store.conn:  # an order with no position behind it
+        store.conn.execute("INSERT INTO orders VALUES ('ghost', 'UP', 1100, 'PAPER', 'x')")
+    store.enqueue_command("BUY", {}, clock.t - 120)
+    broken = {c["name"]: c for c in run_checks(cfg, live=False, now=clock.t + 1)}
+    assert broken["Auto-trader records"]["status"] == FAIL and "ghost" in broken["Auto-trader records"]["detail"]
+    assert broken["Pending orders"]["status"] == WARN
+
+
+def test_dashboard_clear_pending_and_maintenance_actions(env):
+    import dashboard
+
+    cfg, client, store, clock, bot = env
+    store.enqueue_command("BUY", {"side": "UP"}, clock.t)
+    code, out = dashboard.submit_command(cfg, b'{"kind": "CLEAR_PENDING"}', "")
+    assert code == 200 and out["cleared"] == 1
+    assert dashboard.submit_command(cfg, b'{"kind": "RESET_ACCOUNT", "confirm": "RESET"}', "")[0] == 202
+    assert dashboard.submit_command(cfg, b'{"kind": "RESTART_BOT"}', "")[0] == 202
+    missing = replace(cfg, db_path=cfg.db_path.with_name("none.db"))
+    assert dashboard.submit_command(missing, b'{"kind": "RESTART_BOT"}', "")[0] == 503
+
+
+# --- regressions from the code review ------------------------------------------------------------
+def test_pause_works_even_with_an_old_invalid_bot_exit_saved(env):
+    cfg, client, store, clock, bot = env
+    store.set_setting("bot_take_profit", "0.01")  # saved before the 99c rule existed
+    set_books(client, 0.59, 0.60, 0.40, 0.41)
+    status, msg = command(bot, store, clock, "BOT_SETTINGS", enabled=False)
+    assert status == "DONE", msg
+    assert bot.bot_settings()["enabled"] is False and bot.bot_settings()["take_profit"] == 0.01
+    status, msg = command(bot, store, clock, "BOT_SETTINGS", take_profit="", stop_loss="")  # exits only
+    assert status == "DONE" and bot.bot_settings() == {"enabled": False, "take_profit": None, "stop_loss": None}
+
+
+def test_buy_fee_must_fit_in_free_cash(env):
+    cfg, client, store, clock, bot = env
+    tight = replace(cfg, starting_balance_inr=1000.0, taker_fee_rate=0.07)
+    bot2 = Bot(tight, client, bot.detector, store, RiskManager(tight, store), clock=clock, sleep=lambda s: None)
+    set_books(client, 0.49, 0.50, 0.50, 0.51)
+    status, msg = command(bot2, store, clock, "BUY", side="UP", amount_inr=1000)  # all cash, fee on top
+    assert status == "FAILED" and "fee" in msg
+    assert command(bot2, store, clock, "BUY", side="UP", amount_inr=960)[0] == "DONE"
+    assert RiskManager(tight, store).cash_inr() >= 0
+
+
+def test_a_command_is_never_run_twice(tmp_path):
+    store = TradeStore(tmp_path / "t.db", tmp_path / "t.csv")
+    cmd_id = store.enqueue_command("BUY", {}, 1.0)
+    assert store.claim_command(cmd_id) and not store.claim_command(cmd_id)
+    assert store.pending_commands() == []
+    store.close()

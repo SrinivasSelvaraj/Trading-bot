@@ -77,11 +77,15 @@ def utc_iso(dt: datetime | None = None) -> str:
 
 
 class TradeStore:
-    def __init__(self, db_path: Path, csv_path: Path):
+    def __init__(self, db_path: Path, csv_path: Path, migrate: bool = True):
+        """migrate=False skips schema upgrades and backfill; for short-lived writers like the
+        dashboard, so only the bot ever changes the schema."""
         self.db_path = Path(db_path)
         self.csv_path = Path(csv_path)
         self.conn = sqlite3.connect(str(self.db_path), timeout=10)
         self.conn.row_factory = sqlite3.Row
+        if not migrate:
+            return
         self.conn.executescript(_SCHEMA)
         # Databases created by older versions lack newer columns; add them in place.
         for table, columns in (("rounds", ROUND_COLUMNS), ("positions", POSITION_COLUMNS)):
@@ -150,12 +154,12 @@ class TradeStore:
             self._append_csv(row)
 
     # --- money queries (all from positions) ------------------------------------
-    def realized_pnl_inr(self, start_iso: str, end_iso: str) -> float:
-        """Realized P/L of positions whose round started in [start, end)."""
+    def realized_pnl_inr(self, start_iso: str, end_iso: str, source: str | None = None) -> float:
+        """Realized P/L of positions whose round started in [start, end), optionally BOT or MANUAL only."""
         cur = self.conn.execute(
             "SELECT COALESCE(SUM(pnl_inr), 0) FROM positions "
-            "WHERE pnl_inr IS NOT NULL AND round_start >= ? AND round_start < ?",
-            (start_iso, end_iso),
+            "WHERE pnl_inr IS NOT NULL AND round_start >= ? AND round_start < ? AND (? IS NULL OR source = ?)",
+            (start_iso, end_iso, source, source),
         )
         return float(cur.fetchone()[0])
 
@@ -163,13 +167,37 @@ class TradeStore:
         cur = self.conn.execute("SELECT COALESCE(SUM(pnl_inr), 0) FROM positions")
         return float(cur.fetchone()[0])
 
-    def open_exposure_inr(self) -> float:
-        """Money tied up in open positions: stakes plus their buy fees, in ₹."""
+    def open_exposure_inr(self, source: str | None = None) -> float:
+        """Money tied up in open positions (stakes plus buy fees, in ₹), optionally BOT or MANUAL only."""
         cur = self.conn.execute(
             "SELECT COALESCE(SUM(stake_inr + fee_usd * stake_inr / stake_usd), 0) "
-            "FROM positions WHERE status = 'OPEN'"
+            "FROM positions WHERE status = 'OPEN' AND (? IS NULL OR source = ?)",
+            (source, source),
         )
         return float(cur.fetchone()[0])
+
+    def reset_all(self, keep_command_id: int | None = None) -> str | None:
+        """Wipe every trade, round, setting and old command: a fresh paper account.
+
+        trades.csv is kept under a new name rather than deleted. Returns that name, if any."""
+        with self.conn:
+            for table in ("positions", "orders", "rounds", "settings"):
+                self.conn.execute(f"DELETE FROM {table}")
+            self.conn.execute("DELETE FROM commands WHERE id IS NOT ?", (keep_command_id,))
+            self.conn.execute("DELETE FROM sqlite_sequence WHERE name = 'positions'")
+        if self.csv_path.exists() and self.csv_path.stat().st_size:
+            archived = self.csv_path.with_name(
+                f"{self.csv_path.stem}-before-reset-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}{self.csv_path.suffix}")
+            self.csv_path.rename(archived)
+            return archived.name
+        return None
+
+    def clear_pending_commands(self, now: float) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE commands SET status = 'FAILED', message = 'Cleared from the dashboard; nothing was done', "
+                "processed_at = ? WHERE status = 'PENDING'", (now,))
+        return cur.rowcount
 
     # --- positions -----------------------------------------------------------
     def insert_position(self, fields: dict) -> int:
@@ -262,6 +290,12 @@ class TradeStore:
     def pending_commands(self) -> list[dict]:
         cur = self.conn.execute("SELECT * FROM commands WHERE status = 'PENDING' ORDER BY id")
         return [{**dict(r), "payload": json.loads(r["payload"])} for r in cur.fetchall()]
+
+    def claim_command(self, cmd_id: int) -> bool:
+        """Mark a command as taken. False if someone else (e.g. a second bot process) already did."""
+        with self.conn:
+            cur = self.conn.execute("UPDATE commands SET status = 'RUNNING' WHERE id = ? AND status = 'PENDING'", (cmd_id,))
+        return cur.rowcount == 1
 
     def finish_command(self, cmd_id: int, ok: bool, message: str, now: float) -> None:
         with self.conn:
