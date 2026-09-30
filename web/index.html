@@ -163,6 +163,20 @@
   .tag.down { color: var(--text-primary); box-shadow: inset 3px 0 0 var(--series-down); }
   .reason { color: var(--text-muted); font-size: 12px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: bottom; }
 
+  /* wallet */
+  .wallet { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 16px 24px; align-items: center; margin-bottom: 14px; }
+  @media (max-width: 760px) { .wallet { grid-template-columns: minmax(0, 1fr); } }
+  .wallet h2 { margin-bottom: 6px; }
+  .equity { font-size: 34px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
+  .w-sub { color: var(--text-secondary); margin-top: 4px; }
+  .w-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0; }
+  @media (max-width: 1000px) { .w-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .w-stats div { background: var(--surface-2); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+  .w-stats dt { font-size: 12px; color: var(--text-secondary); }
+  .w-stats dd { margin: 2px 0 0; font-size: 18px; font-weight: 650; }
+  .h-note { margin: -4px 0 12px; font-size: 12px; color: var(--text-muted); max-width: 90ch; }
+  .status-live { color: var(--good-text); font-weight: 600; }
+
   footer { margin-top: 18px; font-size: 12px; color: var(--text-muted); }
   .banner { margin-bottom: 14px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); font-size: 13px; display: none; }
 </style>
@@ -178,6 +192,20 @@
   </header>
 
   <div class="banner" id="banner"></div>
+
+  <section class="card wallet" aria-labelledby="wallet-h">
+    <div class="wallet-main">
+      <h2 id="wallet-h">Paper wallet · valued at live prices</h2>
+      <div class="equity num" id="w-equity">–</div>
+      <div class="w-sub"><b id="w-pnl" class="num">–</b> <span id="w-ret" class="num"></span> since the start balance of <span id="w-start" class="num">–</span></div>
+    </div>
+    <dl class="w-stats">
+      <div><dt>Free cash</dt><dd class="num" id="w-cash">–</dd></div>
+      <div><dt>Open trades (live value)</dt><dd class="num" id="w-pos">–</dd></div>
+      <div><dt>Realized P/L</dt><dd class="num" id="w-real">–</dd></div>
+      <div><dt>Live P/L on open trades</dt><dd class="num" id="w-unreal">–</dd></div>
+    </dl>
+  </section>
 
   <div class="grid-top">
     <section class="card" aria-labelledby="live-h">
@@ -206,7 +234,7 @@
     <section class="card" aria-labelledby="res-h">
       <h2 id="res-h">Paper results</h2>
       <div class="tiles">
-        <div class="tile"><div class="k">Total P/L</div><div class="v num" id="t-pnl">–</div><div class="s" id="t-pnl-s"></div></div>
+        <div class="tile"><div class="k">Realized P/L</div><div class="v num" id="t-pnl">–</div><div class="s" id="t-pnl-s"></div></div>
         <div class="tile"><div class="k">Win rate</div><div class="v num" id="t-win">–</div><div class="s" id="t-win-s"></div></div>
         <div class="tile"><div class="k">98% signals</div><div class="v num" id="t-sig">–</div><div class="s" id="t-sig-s"></div></div>
         <div class="tile"><div class="k">Rounds watched</div><div class="v num" id="t-rounds">–</div><div class="s" id="t-rounds-s"></div></div>
@@ -220,8 +248,22 @@
     </section>
   </div>
 
+  <section class="card section" aria-labelledby="pos-h">
+    <h2 id="pos-h">Open positions</h2>
+    <p class="h-note">Each open paper trade is valued the way Polymarket's portfolio values it: shares × the price shown for that side. "Sell now" is what the best bid would pay if you sold immediately. The position pays ₹<span id="pos-rate">96</span> per share (1 USDC) if its side wins and ₹0 if it loses.</p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr>
+          <th>Round (ET)</th><th>Side</th><th class="r">Shares</th><th class="r">Entry</th><th class="r">Live price</th>
+          <th class="r">Value</th><th class="r">Sell now</th><th class="r">Live P/L</th><th class="r">If it wins</th><th>Status</th>
+        </tr></thead>
+        <tbody id="pos-rows"><tr><td colspan="10" class="empty">No open positions</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="card section" aria-labelledby="pnl-h">
-    <h2 id="pnl-h">Cumulative paper P/L (₹) by settled trade</h2>
+    <h2 id="pnl-h">Paper equity (₹) after each settled trade, plus now</h2>
     <div class="chart-wrap" id="chart-wrap">
       <svg class="chart" id="chart" role="img" aria-label="Cumulative paper profit and loss"></svg>
       <div class="tooltip" id="tip"></div>
@@ -297,6 +339,11 @@
       icon = "!"; title = "Conflict — both sides read ≥ " + thr + "%"; sub = "Data problem; no trade this round.";
     } else if (r.fill_status === "FILLED") {
       icon = "✓"; title = `Paper trade: ${side}`; sub = `Entered at UP ${pct(r.up_percentage)} / DOWN ${pct(r.down_percentage)} with ${Math.round(r.seconds_left_at_signal ?? 0)}s left. Result after the round resolves.`;
+      const pos = (data.wallet.positions || []).find((p) => p.slug === r.slug);
+      if (pos) {
+        title += ` · live P/L ${inr(pos.unrealized_inr, true)}`;
+        sub = `Held ${side} is priced at ${(pos.mark_price * 100).toFixed(1)}¢ now (entry ${(pos.entry_price * 100).toFixed(1)}¢). ` + sub;
+      }
     } else if (side === "UP" || side === "DOWN") {
       icon = "–"; title = `${side} reached ${thr}% — ${r.fill_status === "NO_FILL" ? "no fill" : "not traded"}`; sub = r.reason || "";
     }
@@ -350,38 +397,53 @@
   }
 
   // ---------- chart ----------
-  function renderChart(series) {
+  function renderChart(series, w) {
     const svg = $("chart"), tip = $("tip");
-    const W = svg.clientWidth || 600, H = 240, pad = {l: 56, r: 14, t: 12, b: 26};
+    const W = svg.clientWidth || 600, H = 240, pad = {l: 68, r: 14, t: 12, b: 26};
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-    if (!series.length) {
-      svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle">No settled trades yet — the first point appears once a traded round resolves.</text>`;
+    const start = w.starting_balance_inr;
+    const hasLive = w.positions.length > 0;
+    if (!series.length && !hasLive) {
+      svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle">No trades yet. The equity line starts at the first paper trade.</text>`;
       svg.onpointermove = svg.onpointerleave = null; tip.style.display = "none";
       return;
     }
-    const pts = [{cum: 0, start: true}, ...series];
-    const vals = pts.map((p) => p.cum);
-    let lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
+    // start balance, then equity after each settled trade, then "now" including open positions at live prices
+    const pts = [{equity: start, start: true}, ...series];
+    if (hasLive) pts.push({equity: w.equity_inr, live: true});
+    const vals = pts.map((p) => p.equity);
+    let lo = Math.min(start, ...vals), hi = Math.max(start, ...vals);
     if (hi - lo < 20) { hi += 10; lo -= 10; }
     const span = hi - lo; lo -= span * 0.08; hi += span * 0.08;
     const x = (i) => pad.l + (pts.length === 1 ? 0 : i * (W - pad.l - pad.r) / (pts.length - 1));
     const y = (v) => pad.t + (hi - v) * (H - pad.t - pad.b) / (hi - lo);
 
-    const ticks = niceTicks(lo, hi, 4);
     let g = "";
-    for (const tv of ticks) {
+    for (const tv of niceTicks(lo, hi, 4)) {
       g += `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y(tv)}" y2="${y(tv)}" stroke="var(--grid)" stroke-width="1"/>`;
-      g += `<text x="${pad.l - 8}" y="${y(tv) + 4}" text-anchor="end">${tv < 0 ? "−" : ""}₹${Math.abs(tv).toLocaleString("en-IN")}</text>`;
+      g += `<text x="${pad.l - 8}" y="${y(tv) + 4}" text-anchor="end">₹${tv.toLocaleString("en-IN")}</text>`;
     }
-    g += `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y(0)}" y2="${y(0)}" stroke="var(--text-muted)" stroke-width="1"/>`;
-    const d = pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.cum).toFixed(1)}`).join("");
+    g += `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y(start)}" y2="${y(start)}" stroke="var(--text-muted)" stroke-width="1"/>`;
+    const settledPts = hasLive ? pts.slice(0, -1) : pts;
+    const d = settledPts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.equity).toFixed(1)}`).join("");
     g += `<path d="${d}" fill="none" stroke="var(--series-up)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    if (hasLive) {
+      const a = settledPts.length - 1, b = pts.length - 1;
+      g += `<line x1="${x(a)}" y1="${y(pts[a].equity)}" x2="${x(b)}" y2="${y(pts[b].equity)}" stroke="var(--series-up)" stroke-width="2" stroke-dasharray="4 4"/>`;
+    }
     pts.forEach((p, i) => {
       if (p.start) return;
+      if (p.live) {
+        g += `<circle cx="${x(i)}" cy="${y(p.equity)}" r="5" fill="var(--surface-1)" stroke="var(--series-up)" stroke-width="2"/>`;
+        const below = y(p.equity) < H - pad.b - 24;  // keep the label clear of the line and inside the plot
+        g += `<text x="${x(i)}" y="${below ? y(p.equity) + 20 : y(p.equity) - 12}" text-anchor="end">now (live)</text>`;
+        return;
+      }
       const won = p.side === p.result;
-      g += `<circle cx="${x(i)}" cy="${y(p.cum)}" r="4.5" fill="${won ? "var(--good)" : "var(--critical)"}" stroke="var(--surface-1)" stroke-width="2"/>`;
+      g += `<circle cx="${x(i)}" cy="${y(p.equity)}" r="4.5" fill="${won ? "var(--good)" : "var(--critical)"}" stroke="var(--surface-1)" stroke-width="2"/>`;
     });
-    g += `<text x="${pad.l}" y="${H - 6}">start</text><text x="${W - pad.r}" y="${H - 6}" text-anchor="end">trade ${series.length}</text>`;
+    g += `<text x="${pad.l}" y="${H - 6}">start ₹${start.toLocaleString("en-IN")}</text>`;
+    if (series.length) g += `<text x="${x(series.length)}" y="${H - 6}" text-anchor="${hasLive ? "middle" : "end"}">trade ${series.length}</text>`;
     g += `<line id="xh" y1="${pad.t}" y2="${H - pad.b}" stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="3 3" visibility="hidden"/>`;
     svg.innerHTML = g;
 
@@ -393,16 +455,57 @@
       i = Math.max(1, Math.min(pts.length - 1, i));
       const p = pts[i];
       xh.setAttribute("x1", x(i)); xh.setAttribute("x2", x(i)); xh.setAttribute("visibility", "visible");
-      const won = p.side === p.result;
-      tip.innerHTML = `<div class="t-h">Trade ${i} · ${esc(p.side)} → ${won ? "✓ won" : "✗ lost"}</div>` +
-        `<div>${esc(dateTimeFmt(p.t))}</div><div>This trade: <b class="${p.pnl >= 0 ? "pos" : "neg"}">${inr(p.pnl, true)}</b></div>` +
-        `<div>Cumulative: <b>${inr(p.cum, true)}</b></div>`;
+      if (p.live) {
+        tip.innerHTML = `<div class="t-h">Now · open trades at live prices</div>` +
+          `<div>Equity: <b>${inr(p.equity)}</b></div>` +
+          `<div>Live P/L on open trades: <b class="${w.unrealized_inr >= 0 ? "pos" : "neg"}">${inr(w.unrealized_inr, true)}</b></div>`;
+      } else {
+        const won = p.side === p.result;
+        tip.innerHTML = `<div class="t-h">Trade ${i} · ${esc(p.side)} → ${won ? "✓ won" : "✗ lost"}</div>` +
+          `<div>${esc(dateTimeFmt(p.t))}</div><div>This trade: <b class="${p.pnl >= 0 ? "pos" : "neg"}">${inr(p.pnl, true)}</b></div>` +
+          `<div>Equity after: <b>${inr(p.equity)}</b></div>`;
+      }
       tip.style.display = "block";
       const cx = x(i) * rect.width / W, tw = tip.offsetWidth;
       tip.style.left = Math.min(rect.width - tw, Math.max(0, cx + 12 > rect.width - tw ? cx - tw - 12 : cx + 12)) + "px";
-      tip.style.top = Math.max(0, y(p.cum) * rect.height / H - 40) + "px";
+      tip.style.top = Math.max(0, y(p.equity) * rect.height / H - 40) + "px";
     };
     svg.onpointerleave = () => { tip.style.display = "none"; xh.setAttribute("visibility", "hidden"); };
+  }
+
+  // ---------- wallet ----------
+  const signCls = (v) => v > 0 ? "pos" : v < 0 ? "neg" : "";
+  function renderWallet(data) {
+    const w = data.wallet;
+    $("w-equity").textContent = inr(w.equity_inr);
+    const pnl = $("w-pnl");
+    pnl.textContent = inr(w.total_pnl_inr, true);
+    pnl.className = "num " + signCls(w.total_pnl_inr);
+    $("w-ret").textContent = `(${w.return_pct >= 0 ? "+" : "−"}${Math.abs(w.return_pct).toFixed(2)}%)`;
+    $("w-start").textContent = inr(w.starting_balance_inr);
+    $("w-cash").textContent = inr(w.cash_inr);
+    $("w-pos").textContent = inr(w.positions_value_inr);
+    const real = $("w-real"); real.textContent = inr(w.realized_inr, true); real.className = "num " + signCls(w.realized_inr);
+    const un = $("w-unreal"); un.textContent = w.positions.length ? inr(w.unrealized_inr, true) : "—"; un.className = "num " + signCls(w.unrealized_inr);
+    $("pos-rate").textContent = Math.round(data.rules.inr_per_usd);
+
+    const rows = w.positions;
+    if (!rows.length) {
+      $("pos-rows").innerHTML = `<tr><td colspan="10" class="empty">No open positions. A position appears here the moment the bot makes a paper trade.</td></tr>`;
+      return;
+    }
+    $("pos-rows").innerHTML = rows.map((p) => `<tr>
+        <td>${esc(etLabel(p.question))}</td>
+        <td><span class="tag ${p.side === "UP" ? "up" : "down"}">${esc(p.side)}</span></td>
+        <td class="r num">${Number(p.shares).toFixed(2)}</td>
+        <td class="r num">${(p.entry_price * 100).toFixed(1)}¢</td>
+        <td class="r num">${(p.mark_price * 100).toFixed(1)}¢</td>
+        <td class="r num">${inr(p.value_inr)}</td>
+        <td class="r num">${p.sell_value_inr == null ? "no bids" : inr(p.sell_value_inr)}</td>
+        <td class="r num ${signCls(p.unrealized_inr)}">${inr(p.unrealized_inr, true)}</td>
+        <td class="r num pos">${inr(p.max_win_inr, true)}</td>
+        <td>${p.status === "live" ? `<span class="status-live">● live</span>` : "awaiting result"}</td>
+      </tr>`).join("");
   }
 
   function niceTicks(lo, hi, n) {
@@ -465,7 +568,7 @@
       }
       last = data; lastOk = Date.now();
       TZ = data.rules.timezone || TZ;
-      renderBot(data.bot); renderRound(data); renderTiles(data); renderChart(data.pnl_series); renderRows(data.recent);
+      renderBot(data.bot); renderRound(data); renderTiles(data); renderWallet(data); renderChart(data.pnl_series, data.wallet); renderRows(data.recent);
     } catch (e) {
       $("bot-dot").className = "dot offline";
       $("bot-state").textContent = "Dashboard unreachable";
@@ -475,7 +578,7 @@
   refresh();
   if (!SNAP) setInterval(refresh, 2000);
   setInterval(tickCountdown, 250);
-  addEventListener("resize", () => last && renderChart(last.pnl_series));
+  addEventListener("resize", () => last && renderChart(last.pnl_series, last.wallet));
 })();
 </script>
 </body>

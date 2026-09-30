@@ -62,6 +62,8 @@ class RoundState:
     conflict: bool = False
     live_up: float | None = None  # latest raw reading, for display only
     live_down: float | None = None
+    mark_price: float | None = None  # live valuation of our position (displayed price of held side)
+    mark_bid: float | None = None    # what selling the position right now would fetch
     _last_note: str = ""
 
     def observe(self, up: float | None, down: float | None) -> None:
@@ -193,6 +195,8 @@ class Bot:
                 "seconds_left": round(st.rnd.seconds_left(now), 1),
                 "live_up": st.live_up,
                 "live_down": st.live_down,
+                "mark_price": st.mark_price,
+                "mark_bid": st.mark_bid,
             },
             "warning": self._last_error,
         }
@@ -208,7 +212,8 @@ class Bot:
         st = RoundState(rnd=rnd, mode=self.mode)
         existing = self.store.get_round(rnd.slug)
         if existing:  # restarted mid-round: carry on from what was recorded
-            restored = {"up_percentage": "up", "down_percentage": "down"}
+            restored = {"up_percentage": "up", "down_percentage": "down",
+                        "mark_price": "mark_price", "mark_bid": "mark_bid"}
             for col, attr in restored.items():
                 if existing.get(col) is not None:
                     setattr(st, attr, existing[col])
@@ -225,6 +230,27 @@ class Bot:
         self.store.upsert_round(st.row())
         log.info("New round %s (%s), ends %s UTC", rnd.slug, rnd.question, rnd.end.strftime("%H:%M:%S"))
         return st
+
+    def _mark_position(self, st: RoundState, up_book: Book, down_book: Book) -> None:
+        """Value an open paper position at live prices, as a real portfolio would.
+
+        mark_price is the price Polymarket displays for the side we hold (what the portfolio
+        page values it at); mark_bid is what selling it right now would actually fetch.
+        Only called with readings that passed the consistency checks.
+        """
+        if st.fill_status != FILLED or st.decision not in TRADE_DECISIONS:
+            return
+        book = up_book if st.decision == "UP" else down_book
+        mark = displayed_probability(book)
+        if mark is None:
+            return
+        mark, bid = round(mark, 4), book.best_bid
+        if (mark, bid) != (st.mark_price, st.mark_bid):
+            st.mark_price, st.mark_bid = mark, bid
+            self.store.upsert_round({
+                "slug": st.rnd.slug, "mark_price": mark, "mark_bid": bid,
+                "mark_at": utc_iso(datetime.fromtimestamp(self.clock(), tz=timezone.utc)),
+            })
 
     def _close_round(self, st: RoundState) -> None:
         self.store.upsert_round(st.row())
@@ -270,6 +296,7 @@ class Bot:
             decision = INVALID
         else:
             decision = get_decision(up, down)
+            self._mark_position(st, up_book, down_book)
 
         if decision == INVALID:
             st.note(logging.WARNING, f"Prices look inconsistent (UP {up}%, DOWN {down}%), not trading")
@@ -323,6 +350,7 @@ class Bot:
             self.risk.mark_traded(rnd.slug)
             return
         self.risk.mark_traded(rnd.slug)
+        self._mark_position(st, up_book, down_book)  # value the new position straight away
         log.info(
             "[%s] TRADE %s | UP %s%% DOWN %s%% | stake ₹%s ($%.2f) | %.4f shares @ avg %.4f | fee $%.4f | mode %s",
             rnd.slug, decision, up, down, f"{self.cfg.stake_inr:,.0f}", fill.usd_spent,

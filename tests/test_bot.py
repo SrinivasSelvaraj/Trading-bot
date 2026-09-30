@@ -271,6 +271,63 @@ def test_dashboard_state_reflects_bot(env, monkeypatch):
     assert "window.__SNAPSHOT__ = {" in snap and snap.count("window.__SNAPSHOT__ =") == 1
 
 
+def test_open_position_is_marked_to_live_price_and_wallet_matches(env):
+    from report import load_rounds, wallet
+
+    cfg, client, store, clock, bot = env
+    set_books(client, 0.97, 0.99, 0.01, 0.03)  # UP 98% -> buy 11.11 shares at 0.99
+    bot.tick()
+    set_books(client, 0.98, 0.99, 0.01, 0.02)  # UP now displays 98.5%, best bid 0.98
+    clock.t += 2
+    bot.tick()
+    row = store.get_round(slug_for(START))
+    assert (row["mark_price"], row["mark_bid"]) == (0.985, 0.98)
+
+    shares = 11.0 / 0.99
+    w = wallet(load_rounds(cfg.db_path), cfg.starting_balance_inr, "2026-09-30T18:47:00+00:00")
+    (pos,) = w["positions"]
+    assert pos["value_inr"] == pytest.approx(shares * 0.985 * 100, abs=0.01)
+    assert pos["sell_value_inr"] == pytest.approx(shares * 0.98 * 100, abs=0.01)
+    assert pos["unrealized_inr"] == pytest.approx(shares * 0.985 * 100 - 1100, abs=0.01)
+    assert pos["status"] == "live"
+    assert w["cash_inr"] == pytest.approx(10000 - 1100)
+    assert w["total_pnl_inr"] == pytest.approx(pos["unrealized_inr"], abs=0.01)
+
+    settle_market(client, '["1", "0"]')
+    clock.t = START + 400
+    bot.tick()
+    w = wallet(load_rounds(cfg.db_path), cfg.starting_balance_inr, "2026-09-30T19:00:00+00:00")
+    assert w["positions"] == []
+    assert w["equity_inr"] == pytest.approx(10000 + (shares - 11.0) * 100, abs=0.01)
+    assert w["total_pnl_inr"] == w["realized_inr"]
+
+
+def test_no_trade_without_paper_balance(tmp_path):
+    cfg = Config(db_path=tmp_path / "t.db", csv_path=tmp_path / "t.csv", stop_file=tmp_path / "STOP",
+                 starting_balance_inr=1100, timezone="UTC")
+    store = TradeStore(cfg.db_path, cfg.csv_path)
+    risk = RiskManager(cfg, store)
+    assert risk.check_trade("a", 1100, START).allowed
+    store.upsert_round({"slug": "a", "fill_status": "FILLED", "stake_inr": 1100.0, "stake_usd": 11.0,
+                        "fee_usd": 0.0, "round_start": "2026-09-30T18:45:00+00:00"})
+    decision = risk.check_trade("b", 1100, START)
+    assert not decision.allowed and "paper balance" in decision.reason
+    store.close()
+
+
+def test_old_database_gets_new_columns(tmp_path):
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "old.db")
+    conn.execute("CREATE TABLE rounds (slug TEXT PRIMARY KEY, decision)")
+    conn.commit()
+    conn.close()
+    store = TradeStore(tmp_path / "old.db", tmp_path / "t.csv")
+    store.upsert_round({"slug": "x", "mark_price": 0.5})
+    assert store.get_round("x")["mark_price"] == 0.5
+    store.close()
+
+
 def test_loss_is_full_stake(env):
     cfg, client, store, clock, bot = env
     set_books(client, 0.01, 0.03, 0.97, 0.99)  # DOWN 98%

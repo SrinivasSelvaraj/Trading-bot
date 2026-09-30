@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from config import load_config
+from logger import utc_iso
 
 TRADE_SIDES = ("UP", "DOWN")
 
@@ -62,12 +63,64 @@ def summarize(rows: list[dict]) -> dict:
     }
 
 
+def wallet(rows: list[dict], starting_balance_inr: float, now_iso: str) -> dict:
+    """Paper account valued like a real one: cash, open positions at live prices, total P/L.
+
+    - cash        = starting balance + realized P/L - money in open trades (stake + fee)
+    - positions   = shares x price Polymarket displays for the held side (the portfolio value)
+    - sell value  = shares x best bid (what selling right now would actually fetch)
+    - equity      = cash + positions;  total P/L = equity - starting balance
+    """
+    realized = sum(r["profit_loss_inr"] or 0 for r in rows)
+    positions = []
+    for r in rows:
+        if r["fill_status"] != "FILLED" or r["result"] is not None or not r.get("stake_usd"):
+            continue
+        rate = r["stake_inr"] / r["stake_usd"]  # ₹ per $ used for this trade
+        cost = r["stake_inr"] + (r["fee_usd"] or 0) * rate
+        mark = r.get("mark_price") if r.get("mark_price") is not None else r["entry_price"]
+        value = r["shares"] * mark * rate
+        bid = r.get("mark_bid")
+        positions.append({
+            "slug": r["slug"], "question": r["question"], "side": r["decision"],
+            "shares": r["shares"], "entry_price": r["entry_price"], "cost_inr": round(cost, 2),
+            "mark_price": mark, "mark_bid": bid, "mark_at": r.get("mark_at"),
+            "value_inr": round(value, 2),
+            "sell_value_inr": round(r["shares"] * bid * rate, 2) if bid is not None else None,
+            "unrealized_inr": round(value - cost, 2),
+            "max_win_inr": round(r["shares"] * rate - cost, 2),
+            "status": "live" if r["round_end"] > now_iso else "awaiting result",
+            "round_end": r["round_end"],
+        })
+    open_cost = sum(p["cost_inr"] for p in positions)
+    positions_value = sum(p["value_inr"] for p in positions)
+    cash = starting_balance_inr + realized - open_cost
+    equity = cash + positions_value
+    return {
+        "starting_balance_inr": starting_balance_inr,
+        "cash_inr": round(cash, 2),
+        "positions_value_inr": round(positions_value, 2),
+        "equity_inr": round(equity, 2),
+        "realized_inr": round(realized, 2),
+        "unrealized_inr": round(sum(p["unrealized_inr"] for p in positions), 2),
+        "total_pnl_inr": round(equity - starting_balance_inr, 2),
+        "return_pct": round(100 * (equity - starting_balance_inr) / starting_balance_inr, 3),
+        "positions": positions,
+    }
+
+
 def main() -> int:
     cfg = load_config()
     if not cfg.db_path.exists():
         print(f"No database yet at {cfg.db_path}. Run the bot first.")
         return 1
-    s = summarize(load_rounds(cfg.db_path))
+    rows = load_rounds(cfg.db_path)
+    s = summarize(rows)
+    w = wallet(rows, cfg.starting_balance_inr, utc_iso())
+
+    print(f"Paper wallet             : equity ₹{w['equity_inr']:,.2f} "
+          f"(start ₹{w['starting_balance_inr']:,.0f}, total P/L ₹{w['total_pnl_inr']:,.2f}, "
+          f"live/unrealized ₹{w['unrealized_inr']:,.2f}, free cash ₹{w['cash_inr']:,.2f})")
 
     print(f"Rounds observed          : {s['rounds']} ({s['resolved']} resolved)")
     print(f"98% signals              : {s['signals']}")

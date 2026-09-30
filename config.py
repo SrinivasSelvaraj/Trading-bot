@@ -56,6 +56,7 @@ class Config:
     stake_inr: float = 1100.0          # fixed amount per traded round
     max_stake_inr: float = 1100.0      # hard ceiling; anything above is rejected
     max_daily_loss_inr: float = 5000.0
+    starting_balance_inr: float = 10000.0  # paper wallet; trades need free balance like a real account
     inr_per_usd: float = 96.0          # Polymarket settles in USDC; used to convert ₹ <-> $
 
     # --- Execution realism (paper fills) -----------------------------------
@@ -92,6 +93,8 @@ class Config:
             )
         if self.max_daily_loss_inr <= 0:
             raise ConfigError("MAX_DAILY_LOSS_INR must be positive")
+        if self.starting_balance_inr < self.stake_inr:
+            raise ConfigError("STARTING_BALANCE_INR must cover at least one stake")
         if self.inr_per_usd <= 0:
             raise ConfigError("INR_PER_USD must be positive")
         if not 0 < self.max_entry_price < 1:
@@ -113,6 +116,7 @@ def load_config(env_file: Path | None = None) -> Config:
         stake_inr=_float("STAKE_INR", 1100.0),
         max_stake_inr=_float("MAX_STAKE_INR", 1100.0),
         max_daily_loss_inr=_float("MAX_DAILY_LOSS_INR", 5000.0),
+        starting_balance_inr=_float("STARTING_BALANCE_INR", 10000.0),
         inr_per_usd=_float("INR_PER_USD", 96.0),
         max_entry_price=_float("MAX_ENTRY_PRICE", 0.99),
         taker_fee_rate=_float("TAKER_FEE_RATE", 0.07),

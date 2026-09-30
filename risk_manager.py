@@ -49,6 +49,11 @@ class RiskManager:
     def daily_limit_reached(self, now_ts: float) -> bool:
         return self.realized_today_inr(now_ts) <= -self.cfg.max_daily_loss_inr
 
+    # --- paper wallet ------------------------------------------------------------
+    def cash_inr(self) -> float:
+        """Free paper balance: starting balance + all realized P/L - money in open trades."""
+        return self.cfg.starting_balance_inr + self.store.total_realized_inr() - self.store.open_exposure_inr()
+
     # --- the gate -------------------------------------------------------------
     def check_trade(self, slug: str, stake_inr: float, now_ts: float) -> RiskDecision:
         if self.emergency_stop_active():
@@ -59,6 +64,10 @@ class RiskManager:
             return RiskDecision(False, f"stake ₹{stake_inr:,.2f} exceeds max ₹{self.cfg.max_stake_inr:,.2f}")
         if slug in self._traded_slugs or self.store.has_order(slug):
             return RiskDecision(False, "round already traded")
+
+        cash = self.cash_inr()
+        if stake_inr > cash:
+            return RiskDecision(False, f"not enough paper balance (₹{cash:,.2f} free, stake ₹{stake_inr:,.2f})")
 
         realized = self.realized_today_inr(now_ts)
         if realized <= -self.cfg.max_daily_loss_inr:

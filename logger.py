@@ -19,6 +19,8 @@ ROUND_COLUMNS = [
     "decision", "fill_status", "reason", "signal_at", "seconds_left_at_signal",
     "stake_inr", "stake_usd", "entry_price", "shares", "fee_usd",
     "result", "profit_loss_usd", "profit_loss_inr", "settled_at", "updated_at",
+    # live valuation of an open paper position (price the website shows, and best bid)
+    "mark_price", "mark_bid", "mark_at",
 ]
 
 CSV_COLUMNS = [
@@ -55,6 +57,11 @@ class TradeStore:
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        # Databases created by older versions lack newer columns; add them in place.
+        have = {r[1] for r in self.conn.execute("PRAGMA table_info(rounds)")}
+        for col in ROUND_COLUMNS:
+            if col not in have:
+                self.conn.execute(f"ALTER TABLE rounds ADD COLUMN {col}")
         self.conn.commit()
 
     def close(self) -> None:
@@ -123,9 +130,15 @@ class TradeStore:
         )
         return float(cur.fetchone()[0])
 
+    def total_realized_inr(self) -> float:
+        cur = self.conn.execute("SELECT COALESCE(SUM(profit_loss_inr), 0) FROM rounds")
+        return float(cur.fetchone()[0])
+
     def open_exposure_inr(self) -> float:
+        """Money tied up in unsettled paper trades: stakes plus their taker fees, in ₹."""
         cur = self.conn.execute(
-            "SELECT COALESCE(SUM(stake_inr), 0) FROM rounds WHERE fill_status = 'FILLED' AND result IS NULL"
+            "SELECT COALESCE(SUM(stake_inr + COALESCE(fee_usd, 0) * stake_inr / stake_usd), 0) "
+            "FROM rounds WHERE fill_status = 'FILLED' AND result IS NULL AND stake_usd > 0"
         )
         return float(cur.fetchone()[0])
 

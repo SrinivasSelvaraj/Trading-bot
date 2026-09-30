@@ -13,12 +13,14 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from config import BASE_DIR, Config, load_config
-from report import load_rounds, summarize
+from logger import utc_iso
+from report import load_rounds, summarize, wallet
 from strategy import THRESHOLD_PCT
 
 INDEX_HTML = BASE_DIR / "web" / "index.html"
@@ -55,9 +57,11 @@ def build_state(cfg: Config) -> dict:
             pnl_series.append({
                 "t": r["round_end"], "slug": r["slug"], "side": r["decision"], "result": r["result"],
                 "pnl": r["profit_loss_inr"], "cum": round(total, 2),
+                "equity": round(cfg.starting_balance_inr + total, 2),
             })
     recent = [{k: r.get(k) for k in ROUND_COLUMNS} for r in reversed(rows[-RECENT_ROUNDS:])]
     return {
+        "wallet": wallet(rows, cfg.starting_balance_inr, utc_iso(datetime.fromtimestamp(now, tz=timezone.utc))),
         "now": now,
         "bot": read_status(cfg, now),
         "rules": {
@@ -65,6 +69,7 @@ def build_state(cfg: Config) -> dict:
             "stake_inr": cfg.stake_inr,
             "max_daily_loss_inr": cfg.max_daily_loss_inr,
             "max_entry_price": cfg.max_entry_price,
+            "inr_per_usd": cfg.inr_per_usd,
             "paper_mode": cfg.paper_mode,
             "timezone": cfg.timezone,
         },

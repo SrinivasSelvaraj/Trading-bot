@@ -108,6 +108,7 @@ The displayed 98% is the market's price, not a guarantee. The rule only makes mo
 | `STAKE_INR` | `1100` | fixed amount per traded round (no martingale, no increases) |
 | `MAX_STAKE_INR` | `1100` | hard ceiling |
 | `MAX_DAILY_LOSS_INR` | `5000` | stop trading for the day when reached |
+| `STARTING_BALANCE_INR` | `10000` | paper wallet; a trade needs this much free balance |
 | `INR_PER_USD` | `96` | conversion for stake and P/L; update occasionally |
 | `MAX_ENTRY_PRICE` | `0.99` | never pay more than this per share |
 | `TAKER_FEE_RATE` | `0.07` | Polymarket crypto taker fee rate |
@@ -125,6 +126,8 @@ python dashboard.py                # terminal 2: open http://127.0.0.1:8000
 ```
 
 The dashboard shows the live round (UP/DOWN bars against the 98% line, countdown, what the rule decided), paper P/L, win rate against the break-even rate, today's loss against the daily limit, a cumulative P/L chart and the recent rounds. It refreshes every 2 seconds from the bot's `status.json` heartbeat and `trades.db`.
+
+The top of the page is a **paper wallet valued like a real account**: free cash, open trades at live prices, realized P/L, live P/L on open trades, and total equity. Each open position is marked every 2 seconds at the price Polymarket shows for the side held (how Polymarket's portfolio values it), next to what selling it at the best bid would fetch, and what it pays if it wins. Once the round resolves, the live P/L becomes realized P/L. The bot also refuses a trade the wallet can't afford.
 
 The page is **read-only**: it has no buttons and no write endpoints, so sharing it can't start, stop or change the bot.
 
