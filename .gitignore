@@ -1,0 +1,10 @@
+.env
+trades.db
+trades.csv
+bot.log
+STOP
+__pycache__/
+.pytest_cache/
+*.pyc
+.venv/
+venv/
