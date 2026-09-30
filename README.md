@@ -65,6 +65,7 @@ when Polymarket resolves it: record the result and P/L, append a row to trades.c
 | `report.py` | summary of results |
 | `dashboard.py` + `web/index.html` | read-only web dashboard |
 | `app.py`, `Procfile`, `deploy_heroku.sh` | hosted mode: bot + dashboard in one process (Heroku) |
+| `wsgi.py`, `deploy_pythonanywhere.py` | dashboard as a WSGI app + PythonAnywhere deploy (PythonAnywhere) |
 | `config.py` / `.env` | settings |
 
 ### Checks before any (paper) trade
@@ -154,6 +155,23 @@ Limits to know:
 - **Data resets on every restart.** Heroku's filesystem is temporary, and dynos restart at least once a day and on every deploy, so `trades.db` starts empty each time. Use Heroku for a demo; keep the long paper record on your own machine (or add a Heroku Postgres database).
 - **Eco dynos sleep** after 30 minutes without web traffic, which pauses the bot. Use a Basic dyno for 24/7 monitoring.
 - The app only reads Polymarket's public data and stays in paper mode. The public URL is read-only.
+
+## Deploy to PythonAnywhere
+
+On PythonAnywhere the dashboard runs as the web app (`wsgi.py`) and the bot runs as an always-on task (`bot.py`). They share the same folder, and PythonAnywhere keeps files, so the paper record **survives restarts**. The sites the bot needs (`gamma-api.polymarket.com`, `clob.polymarket.com`, `api.coinbase.com`) are on the free-plan allowlist. No extra packages are needed: `requests` is preinstalled and the timezone data comes from the system.
+
+```bash
+export PYTHONANYWHERE_USERNAME=yourname
+export PYTHONANYWHERE_API_TOKEN=...                 # Account → API token
+export PYTHONANYWHERE_HOST=www.pythonanywhere.com   # eu.pythonanywhere.com for EU accounts
+python deploy_pythonanywhere.py --dry-run           # see the steps
+python deploy_pythonanywhere.py                     # upload, create/reload web app, start the bot task
+```
+
+The script uploads the files committed to git (not your `.env` or data files), sets up `https://<yourname>.pythonanywhere.com/`, and creates the always-on task. Re-run it to deploy new code, then restart the task from the Tasks tab.
+
+- **Free plan:** the dashboard works, but always-on tasks need a paid plan (Hacker). On free you can start `python3.11 ~/Trading-bot/bot.py` from a Bash console, but consoles don't run 24/7.
+- **Emergency stop:** open a Bash console and run `cd ~/Trading-bot && python3.11 bot.py --stop`, or disable the task in the Tasks tab.
 
 ## Optional browser window
 
