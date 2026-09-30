@@ -182,7 +182,8 @@ class Clock:
 def env(tmp_path):
     cfg = Config(
         db_path=tmp_path / "t.db", csv_path=tmp_path / "t.csv", log_path=tmp_path / "b.log",
-        stop_file=tmp_path / "STOP", inr_per_usd=100.0, taker_fee_rate=0.0,
+        stop_file=tmp_path / "STOP", status_path=tmp_path / "status.json", inr_per_usd=100.0,
+        taker_fee_rate=0.0,
     )
     client = FakeClient()
     client.markets[slug_for(START)] = gamma_market()
@@ -251,6 +252,23 @@ def test_inconsistent_readings_after_fill_do_not_overwrite_entry_values(env):
     assert (row["up_percentage"], row["down_percentage"]) == (98.5, 1.5)
     assert row["peak_down"] == 1.5
     assert store.conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 1
+
+
+def test_dashboard_state_reflects_bot(env, monkeypatch):
+    import dashboard
+
+    cfg, client, store, clock, bot = env
+    set_books(client, 0.97, 0.99, 0.01, 0.03)
+    bot.tick()
+    monkeypatch.setattr(dashboard.time, "time", lambda: clock.t + 1)  # heartbeat is 1s old
+    state = dashboard.build_state(cfg)
+    assert state["bot"]["state"] == "running"
+    assert state["bot"]["status"]["round"]["live_up"] == 98.0
+    assert state["summary"]["filled"] == 1 and state["recent"][0]["fill_status"] == "FILLED"
+    cfg.stop_file.write_text("stop")
+    assert dashboard.build_state(cfg)["bot"]["state"] == "stopped"
+    snap = dashboard.render_snapshot(cfg)
+    assert "window.__SNAPSHOT__ = {" in snap and snap.count("window.__SNAPSHOT__ =") == 1
 
 
 def test_loss_is_full_stake(env):

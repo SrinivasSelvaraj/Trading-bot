@@ -74,6 +74,7 @@ class Config:
     csv_path: Path = BASE_DIR / "trades.csv"
     log_path: Path = BASE_DIR / "bot.log"
     stop_file: Path = BASE_DIR / "STOP"
+    status_path: Path = BASE_DIR / "status.json"  # heartbeat read by the dashboard
 
     # --- Optional browser mirror -------------------------------------------
     browser_enabled: bool = False
@@ -124,6 +125,7 @@ def load_config(env_file: Path | None = None) -> Config:
         csv_path=Path(_str("CSV_PATH", str(BASE_DIR / "trades.csv"))),
         log_path=Path(_str("LOG_PATH", str(BASE_DIR / "bot.log"))),
         stop_file=Path(_str("STOP_FILE", str(BASE_DIR / "STOP"))),
+        status_path=Path(_str("STATUS_PATH", str(BASE_DIR / "status.json"))),
         browser_enabled=_bool("BROWSER_ENABLED", False),
         browser_headless=_bool("BROWSER_HEADLESS", False),
         browser_crosscheck=_bool("BROWSER_CROSSCHECK", False),

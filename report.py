@@ -6,8 +6,60 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from pathlib import Path
 
 from config import load_config
+
+TRADE_SIDES = ("UP", "DOWN")
+
+
+def load_rounds(db_path: Path) -> list[dict]:
+    """All recorded rounds, oldest first. Opens the database read-only."""
+    if not Path(db_path).exists():
+        return []
+    conn = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(r) for r in conn.execute("SELECT * FROM rounds ORDER BY round_start")]
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
+
+
+def summarize(rows: list[dict]) -> dict:
+    resolved = [r for r in rows if r["result"] not in (None, "UNRESOLVED")]
+    signals = [r for r in rows if r["decision"] in TRADE_SIDES]
+    signals_resolved = [r for r in signals if r["result"] not in (None, "UNRESOLVED")]
+    filled = [r for r in rows if r["fill_status"] == "FILLED"]
+    settled = [r for r in filled if r["profit_loss_inr"] is not None]
+    wins = [r for r in settled if r["decision"] == r["result"]]
+
+    not_filled: dict[str, int] = {}
+    for r in signals:
+        if r["fill_status"] != "FILLED":
+            key = f"{r['fill_status']}: {r['reason']}"
+            not_filled[key] = not_filled.get(key, 0) + 1
+
+    avg_entry = sum(r["entry_price"] for r in settled) / len(settled) if settled else None
+    return {
+        "rounds": len(rows),
+        "resolved": len(resolved),
+        "signals": len(signals),
+        "signals_resolved": len(signals_resolved),
+        "signal_side_won": sum(1 for r in signals_resolved if r["decision"] == r["result"]),
+        "filled": len(filled),
+        "open": len(filled) - len(settled),
+        "settled": len(settled),
+        "wins": len(wins),
+        "losses": len(settled) - len(wins),
+        "win_rate": 100 * len(wins) / len(settled) if settled else None,
+        "avg_entry": avg_entry,
+        "breakeven_rate": 100 * avg_entry if avg_entry is not None else None,
+        "pnl_inr": round(sum(r["profit_loss_inr"] for r in settled), 2),
+        "conflicts": sum(1 for r in rows if r["decision"] == "CONFLICT"),
+        "not_filled": dict(sorted(not_filled.items(), key=lambda kv: -kv[1])),
+    }
 
 
 def main() -> int:
@@ -15,42 +67,23 @@ def main() -> int:
     if not cfg.db_path.exists():
         print(f"No database yet at {cfg.db_path}. Run the bot first.")
         return 1
-    conn = sqlite3.connect(str(cfg.db_path))
-    conn.row_factory = sqlite3.Row
-    rows = [dict(r) for r in conn.execute("SELECT * FROM rounds ORDER BY round_start")]
-    conn.close()
+    s = summarize(load_rounds(cfg.db_path))
 
-    settled = [r for r in rows if r["result"] not in (None, "UNRESOLVED")]
-    signals = [r for r in rows if r["decision"] in ("UP", "DOWN")]
-    signals_settled = [r for r in signals if r["result"] not in (None, "UNRESOLVED")]
-    filled = [r for r in rows if r["fill_status"] == "FILLED"]
-    filled_settled = [r for r in filled if r["profit_loss_inr"] is not None]
-    wins = [r for r in filled_settled if r["decision"] == r["result"]]
-    pnl = sum(r["profit_loss_inr"] for r in filled_settled)
-    conflicts = [r for r in rows if r["decision"] == "CONFLICT"]
-
-    print(f"Rounds observed          : {len(rows)} ({len(settled)} resolved)")
-    print(f"98% signals              : {len(signals)}")
-    if signals_settled:
-        right = sum(1 for r in signals_settled if r["decision"] == r["result"])
-        print(f"  signal side won        : {right}/{len(signals_settled)} "
-              f"({100 * right / len(signals_settled):.2f}%)  <- includes rounds with no fill")
-    print(f"Paper trades filled      : {len(filled)}")
-    by_reason: dict[str, int] = {}
-    for r in signals:
-        if r["fill_status"] != "FILLED":
-            key = f"{r['fill_status']}: {r['reason']}"
-            by_reason[key] = by_reason.get(key, 0) + 1
-    for key, n in sorted(by_reason.items(), key=lambda kv: -kv[1]):
+    print(f"Rounds observed          : {s['rounds']} ({s['resolved']} resolved)")
+    print(f"98% signals              : {s['signals']}")
+    if s["signals_resolved"]:
+        print(f"  signal side won        : {s['signal_side_won']}/{s['signals_resolved']} "
+              f"({100 * s['signal_side_won'] / s['signals_resolved']:.2f}%)  <- includes rounds with no fill")
+    print(f"Paper trades filled      : {s['filled']}")
+    for key, n in s["not_filled"].items():
         print(f"  not filled             : {n} x {key}")
-    if filled_settled:
-        losses = len(filled_settled) - len(wins)
-        avg_entry = sum(r["entry_price"] for r in filled_settled) / len(filled_settled)
-        print(f"  settled                : {len(filled_settled)}  wins {len(wins)}  losses {losses}  "
-              f"win rate {100 * len(wins) / len(filled_settled):.2f}%")
-        print(f"  average entry price    : {avg_entry:.4f} (break-even win rate ≈ {100 * avg_entry:.2f}% + fees)")
-        print(f"  total paper P/L        : ₹{pnl:,.2f}")
-    print(f"Conflicts (both >= 98%)  : {len(conflicts)}")
+    if s["settled"]:
+        print(f"  settled                : {s['settled']}  wins {s['wins']}  losses {s['losses']}  "
+              f"win rate {s['win_rate']:.2f}%")
+        print(f"  average entry price    : {s['avg_entry']:.4f} "
+              f"(break-even win rate ≈ {s['breakeven_rate']:.2f}% + fees)")
+        print(f"  total paper P/L        : ₹{s['pnl_inr']:,.2f}")
+    print(f"Conflicts (both >= 98%)  : {s['conflicts']}")
     return 0
 
 

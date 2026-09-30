@@ -13,7 +13,9 @@ the result and P/L are filled in and the row is appended to trades.csv.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -58,6 +60,8 @@ class RoundState:
     seconds_left_at_signal: float | None = None
     btc_price_signal: float | None = None
     conflict: bool = False
+    live_up: float | None = None  # latest raw reading, for display only
+    live_down: float | None = None
     _last_note: str = ""
 
     def observe(self, up: float | None, down: float | None) -> None:
@@ -171,6 +175,33 @@ class Bot:
                 self.browser.open(rnd.url)
 
         self._evaluate(self.state, now)
+        self._write_status(now)
+
+    def _write_status(self, now: float) -> None:
+        """Heartbeat for the dashboard. Never allowed to break the trading loop."""
+        st = self.state
+        status = {
+            "updated_at": now,
+            "mode": self.mode,
+            "poll_seconds": self.cfg.poll_seconds,
+            "stake_inr": self.cfg.stake_inr,
+            "max_daily_loss_inr": self.cfg.max_daily_loss_inr,
+            "realized_today_inr": self.risk.realized_today_inr(now),
+            "round": None if st is None else {
+                **st.row(),
+                "url": st.rnd.url,
+                "seconds_left": round(st.rnd.seconds_left(now), 1),
+                "live_up": st.live_up,
+                "live_down": st.live_down,
+            },
+            "warning": self._last_error,
+        }
+        try:
+            tmp = self.cfg.status_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(status), encoding="utf-8")
+            os.replace(tmp, self.cfg.status_path)
+        except OSError as exc:
+            self._warn_once(f"Could not write status file: {exc}")
 
     # --- per round ---------------------------------------------------------------
     def _new_state(self, rnd: Round) -> RoundState:
@@ -231,6 +262,7 @@ class Bot:
         up_book, down_book = books
         up = to_pct(displayed_probability(up_book))
         down = to_pct(displayed_probability(down_book))
+        st.live_up, st.live_down = up, down
 
         if up is None or down is None:
             decision = INVALID

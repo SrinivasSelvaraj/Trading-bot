@@ -63,6 +63,7 @@ when Polymarket resolves it: record the result and P/L, append a row to trades.c
 | `polymarket_api.py` | read-only client for Polymarket's public APIs |
 | `browser.py` | optional read-only browser window (Playwright) |
 | `report.py` | summary of results |
+| `dashboard.py` + `web/index.html` | read-only web dashboard |
 | `config.py` / `.env` | settings |
 
 ### Checks before any (paper) trade
@@ -113,6 +114,29 @@ The displayed 98% is the market's price, not a guarantee. The rule only makes mo
 | `TIMEZONE` | `Asia/Kolkata` | day boundary for the loss limit |
 | `BROWSER_ENABLED` | `False` | open the current round in a browser window |
 | `BROWSER_CROSSCHECK` | `False` | require page values to match the API before trading |
+
+## Web dashboard
+
+```bash
+python bot.py                      # terminal 1: the bot
+python dashboard.py                # terminal 2: open http://127.0.0.1:8000
+```
+
+The dashboard shows the live round (UP/DOWN bars against the 98% line, countdown, what the rule decided), paper P/L, win rate against the break-even rate, today's loss against the daily limit, a cumulative P/L chart and the recent rounds. It refreshes every 2 seconds from the bot's `status.json` heartbeat and `trades.db`.
+
+The page is **read-only**: it has no buttons and no write endpoints, so sharing it can't start, stop or change the bot.
+
+To show it to someone else temporarily, run a tunnel next to it on your laptop, for example:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8000      # prints a https://…trycloudflare.com link
+```
+
+Stop the tunnel (Ctrl+C) and the link dies. To share a frozen copy instead, save one file with the data built in:
+
+```bash
+python dashboard.py --snapshot dashboard-snapshot.html
+```
 
 ## Optional browser window
 

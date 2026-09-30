@@ -3,6 +3,8 @@ trades.db
 trades.csv
 bot.log
 STOP
+status.json
+status.tmp
 __pycache__/
 .pytest_cache/
 *.pyc
