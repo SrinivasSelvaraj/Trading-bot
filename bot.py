@@ -26,6 +26,7 @@ from config import Config, ConfigError, load_config
 from logger import TradeStore, setup_logging, utc_iso
 from market_detector import MarketDetector, MarketVerificationError, Round, round_start_ts
 from polymarket_api import ApiError, PolymarketClient
+from paper_account import BOT, MANUAL, SIDES, SOLD, UNRESOLVED, Books, PaperAccount, validate_exits
 from quotes import Book, displayed_probability, parse_book, simulate_buy, to_pct, with_complement_asks
 from risk_manager import RiskManager
 from strategy import CONFLICT, INVALID, NO_TRADE, THRESHOLD_PCT, TRADE_DECISIONS, get_decision
@@ -62,8 +63,7 @@ class RoundState:
     conflict: bool = False
     live_up: float | None = None  # latest raw reading, for display only
     live_down: float | None = None
-    mark_price: float | None = None  # live valuation of our position (displayed price of held side)
-    mark_bid: float | None = None    # what selling the position right now would fetch
+    quote: dict | None = None        # best prices per side from the latest books, for the dashboard
     _last_note: str = ""
 
     def observe(self, up: float | None, down: float | None) -> None:
@@ -124,6 +124,7 @@ class Bot:
         self.clock = clock
         self.sleep = sleep
         self.mode = "PAPER" if cfg.paper_mode else "LIVE"
+        self.account = PaperAccount(cfg, store)
         self.state: RoundState | None = None
         self._last_settle = 0.0
         self._last_error = ""
@@ -171,13 +172,44 @@ class Bot:
                 rnd = self.detector.current_round(now)
             except (ApiError, MarketVerificationError) as exc:
                 self._warn_once(f"Cannot identify the current BTC 5m market, not trading: {exc}")
+                self._process_commands(None, None, now)
+                self._write_status(now)
                 return
             self.state = self._new_state(rnd)
             if self.browser:
                 self.browser.open(rnd.url)
 
-        self._evaluate(self.state, now)
+        st = self.state
+        raw = self._read_books(st.rnd, now) if st.rnd.seconds_left(now) > 0 else None
+        # positions are only valued, exited or traded on readings that pass the checks
+        books = raw if raw is not None and self._consistent(raw) else None
+        st.quote = books.quote() if books else None
+        if books is not None:
+            for event in self.account.update_marks_and_exits(st.rnd.slug, books, self._iso(now)):
+                log.info("[%s] %s", st.rnd.slug, event)
+        self._process_commands(st, books, now)
+        if raw is not None:
+            self._evaluate(st, now, raw)
         self._write_status(now)
+
+    @staticmethod
+    def _iso(ts: float) -> str:
+        return utc_iso(datetime.fromtimestamp(ts, tz=timezone.utc))
+
+    def _consistent(self, books: Books) -> bool:
+        up = to_pct(books.price("UP"))
+        down = to_pct(books.price("DOWN"))
+        return up is not None and down is not None and abs(up + down - 100) <= self.cfg.max_prob_sum_deviation
+
+    def bot_settings(self) -> dict:
+        def price(key: str) -> float | None:
+            raw = self.store.get_setting(key)
+            return float(raw) if raw not in (None, "") else None
+        return {
+            "enabled": self.store.get_setting("bot_enabled", "1") == "1",
+            "take_profit": price("bot_take_profit"),
+            "stop_loss": price("bot_stop_loss"),
+        }
 
     def _write_status(self, now: float) -> None:
         """Heartbeat for the dashboard. Never allowed to break the trading loop."""
@@ -195,9 +227,11 @@ class Bot:
                 "seconds_left": round(st.rnd.seconds_left(now), 1),
                 "live_up": st.live_up,
                 "live_down": st.live_down,
-                "mark_price": st.mark_price,
-                "mark_bid": st.mark_bid,
+                "quote": st.quote,
+                "accepting_orders": st.rnd.accepting_orders,
             },
+            "bot_settings": self.bot_settings(),
+            "no_trade_last_seconds": self.cfg.no_trade_last_seconds,
             "warning": self._last_error,
         }
         try:
@@ -212,8 +246,7 @@ class Bot:
         st = RoundState(rnd=rnd, mode=self.mode)
         existing = self.store.get_round(rnd.slug)
         if existing:  # restarted mid-round: carry on from what was recorded
-            restored = {"up_percentage": "up", "down_percentage": "down",
-                        "mark_price": "mark_price", "mark_bid": "mark_bid"}
+            restored = {"up_percentage": "up", "down_percentage": "down"}
             for col, attr in restored.items():
                 if existing.get(col) is not None:
                     setattr(st, attr, existing[col])
@@ -231,27 +264,6 @@ class Bot:
         log.info("New round %s (%s), ends %s UTC", rnd.slug, rnd.question, rnd.end.strftime("%H:%M:%S"))
         return st
 
-    def _mark_position(self, st: RoundState, up_book: Book, down_book: Book) -> None:
-        """Value an open paper position at live prices, as a real portfolio would.
-
-        mark_price is the price Polymarket displays for the side we hold (what the portfolio
-        page values it at); mark_bid is what selling it right now would actually fetch.
-        Only called with readings that passed the consistency checks.
-        """
-        if st.fill_status != FILLED or st.decision not in TRADE_DECISIONS:
-            return
-        book = up_book if st.decision == "UP" else down_book
-        mark = displayed_probability(book)
-        if mark is None:
-            return
-        mark, bid = round(mark, 4), book.best_bid
-        if (mark, bid) != (st.mark_price, st.mark_bid):
-            st.mark_price, st.mark_bid = mark, bid
-            self.store.upsert_round({
-                "slug": st.rnd.slug, "mark_price": mark, "mark_bid": bid,
-                "mark_at": utc_iso(datetime.fromtimestamp(self.clock(), tz=timezone.utc)),
-            })
-
     def _close_round(self, st: RoundState) -> None:
         self.store.upsert_round(st.row())
         log.info(
@@ -260,7 +272,7 @@ class Bot:
             f" ({st.reason})" if st.reason else "",
         )
 
-    def _read_books(self, rnd: Round, now: float) -> tuple[Book, Book] | None:
+    def _read_books(self, rnd: Round, now: float) -> Books | None:
         try:
             up_book = parse_book(self.client.get_book(rnd.up_token))
             down_book = parse_book(self.client.get_book(rnd.down_token))
@@ -275,19 +287,16 @@ class Bot:
                 self._warn_once(f"{name} order book is {age:.0f}s old (stale), not trading")
                 return None
         self._last_error = ""
-        return up_book, down_book
+        return Books(up_book, down_book)
 
-    def _evaluate(self, st: RoundState, now: float) -> None:
+    def _evaluate(self, st: RoundState, now: float, books: Books) -> None:
+        """Apply the 98% rule to this poll's books and, if every check passes, make the bot's trade."""
         rnd = st.rnd
         secs_left = rnd.seconds_left(now)
         if secs_left <= 0:
             return
-        books = self._read_books(rnd, now)
-        if books is None:
-            return
-        up_book, down_book = books
-        up = to_pct(displayed_probability(up_book))
-        down = to_pct(displayed_probability(down_book))
+        up = to_pct(books.price("UP"))
+        down = to_pct(books.price("DOWN"))
         st.live_up, st.live_down = up, down
 
         if up is None or down is None:
@@ -296,7 +305,6 @@ class Bot:
             decision = INVALID
         else:
             decision = get_decision(up, down)
-            self._mark_position(st, up_book, down_book)
 
         if decision == INVALID:
             st.note(logging.WARNING, f"Prices look inconsistent (UP {up}%, DOWN {down}%), not trading")
@@ -329,8 +337,7 @@ class Bot:
             st.note(logging.WARNING, f"{decision} signal but not trading: {blocked}")
             return
 
-        book = with_complement_asks(up_book, down_book) if decision == "UP" else with_complement_asks(down_book, up_book)
-        fill = simulate_buy(book, self.cfg.stake_usd, self.cfg.max_entry_price, self.cfg.taker_fee_rate)
+        fill = self.account.quote_buy(books, decision, self.cfg.stake_inr)
         if not fill.filled:
             st.fill_status, st.reason = NO_FILL, fill.reason
             st.note(logging.INFO, f"{decision} signal, no paper fill: {fill.reason} (will keep trying)")
@@ -350,7 +357,12 @@ class Bot:
             self.risk.mark_traded(rnd.slug)
             return
         self.risk.mark_traded(rnd.slug)
-        self._mark_position(st, up_book, down_book)  # value the new position straight away
+        exits = self.bot_settings()
+        self.account.record_open(
+            source=BOT, rnd=rnd, side=decision, fill=fill, amount_inr=self.cfg.stake_inr,
+            take_profit=exits["take_profit"], stop_loss=exits["stop_loss"], mode=self.mode,
+            now_iso=self._iso(now), books=books,
+        )
         log.info(
             "[%s] TRADE %s | UP %s%% DOWN %s%% | stake ₹%s ($%.2f) | %.4f shares @ avg %.4f | fee $%.4f | mode %s",
             rnd.slug, decision, up, down, f"{self.cfg.stake_inr:,.0f}", fill.usd_spent,
@@ -358,6 +370,8 @@ class Bot:
         )
 
     def _pre_trade_block(self, st: RoundState, now: float, secs_left: float, up: float, down: float) -> str:
+        if not self.bot_settings()["enabled"]:
+            return "auto-trader is paused from the dashboard"
         if secs_left <= self.cfg.no_trade_last_seconds:
             return f"inside the final {self.cfg.no_trade_last_seconds:.0f}s of the round"
         if not st.rnd.accepting_orders:
@@ -391,28 +405,118 @@ class Bot:
             if result is None:
                 ended = datetime.fromisoformat(row["round_end"]).timestamp()
                 if now - ended > GIVE_UP_SETTLING_AFTER_SECONDS:
-                    log.warning("[%s] no resolution after 24h, marking UNRESOLVED", row["slug"])
-                    self.store.settle(row["slug"], "UNRESOLVED", None, None)
+                    log.warning("[%s] no resolution after 24h, marking UNRESOLVED (stakes returned)", row["slug"])
+                    self.account.settle(row["slug"], UNRESOLVED, self._iso(now))
+                    self.store.settle(row["slug"], UNRESOLVED, None, None)
                 continue
             self._settle_row(row, result)
+        self._settle_stragglers(now, current)
+
+    def _settle_stragglers(self, now: float, current: str | None) -> None:
+        """Open positions whose round has ended but was settled without them (e.g. by an older
+        bot version sharing the database). Pay them out from the round's recorded result."""
+        for slug in self.store.ended_open_position_slugs(self._iso(now)):
+            if slug == current:
+                continue
+            row = self.store.get_round(slug) or {}
+            result = row.get("result")
+            if result is None:
+                try:
+                    result = self.detector.resolution(slug)
+                except ApiError:
+                    return
+            if result is None:
+                continue
+            for pos in self.account.settle(slug, result, self._iso(now)):
+                log.info("[%s] RESULT %s | %s #%s %s | P/L ₹%s (late settlement)",
+                         slug, result, pos["source"], pos["id"], pos["side"], pos.get("pnl_inr"))
 
     def _settle_row(self, row: dict, result: str) -> None:
-        pnl_usd = pnl_inr = None
-        if row.get("fill_status") == FILLED and row.get("decision") in TRADE_DECISIONS:
-            won = row["decision"] == result
-            payout = row["shares"] if won else 0.0
-            pnl_usd = round(payout - row["stake_usd"] - (row.get("fee_usd") or 0.0), 4)
-            pnl_inr = round(pnl_usd * self.cfg.inr_per_usd, 2)
+        now = self.clock()
+        for pos in self.account.settle(row["slug"], result, self._iso(now)):
+            log.info(
+                "[%s] RESULT %s | %s #%s %s -> %s | P/L ₹%s | today ₹%s",
+                row["slug"], result, pos["source"], pos["id"], pos["side"],
+                "WIN" if pos["side"] == result else "LOSS", f"{pos['pnl_inr']:,.2f}",
+                f"{self.risk.realized_today_inr(now):,.2f}",
+            )
+        # the round's P/L is the bot's own position, however it ended (resolution, stop loss, ...)
+        bot_pos = self.store.bot_position(row["slug"])
+        pnl_usd = bot_pos["pnl_usd"] if bot_pos else None
+        pnl_inr = bot_pos["pnl_inr"] if bot_pos else None
         self.store.settle(row["slug"], result, pnl_usd, pnl_inr)
-        if pnl_inr is None:
-            return
-        log.info(
-            "[%s] RESULT %s | traded %s -> %s | P/L ₹%s ($%.2f) | today ₹%s",
-            row["slug"], result, row["decision"], "WIN" if row["decision"] == result else "LOSS",
-            f"{pnl_inr:,.2f}", pnl_usd, f"{self.risk.realized_today_inr(self.clock()):,.2f}",
-        )
-        if self.risk.daily_limit_reached(self.clock()):
+        if bot_pos and self.risk.daily_limit_reached(now):
             log.error("DAILY LOSS LIMIT REACHED. No more trades today (monitoring continues).")
+
+    # --- dashboard commands ------------------------------------------------------------
+    def _process_commands(self, st: RoundState | None, books: Books | None, now: float) -> None:
+        for cmd in self.store.pending_commands():
+            if now - cmd["created_at"] > self.cfg.command_max_age_seconds:
+                ok, msg = False, "Expired before the bot could run it; nothing was done"
+            else:
+                try:
+                    ok, msg = self._run_command(cmd["kind"], cmd["payload"], st, books, now)
+                except (KeyError, TypeError, ValueError) as exc:
+                    ok, msg = False, f"Bad request ({exc})"
+            self.store.finish_command(cmd["id"], ok, msg, now)
+            log.info("Dashboard %s #%s %s: %s", cmd["kind"], cmd["id"], "done" if ok else "refused", msg)
+
+    def _run_command(self, kind: str, p: dict, st: RoundState | None, books: Books | None,
+                     now: float) -> tuple[bool, str]:
+        cents = lambda v: None if v in (None, "") else float(v) / 100  # noqa: E731 - UI sends prices in ¢
+        live = st is not None and books is not None and st.rnd.seconds_left(now) > 0
+
+        if kind == "BUY":
+            side, amount = p["side"], float(p["amount_inr"])
+            tp, sl = cents(p.get("take_profit")), cents(p.get("stop_loss"))
+            if side not in SIDES:
+                return False, "Side must be UP or DOWN"
+            problem = validate_exits(tp, sl)
+            if problem:
+                return False, problem
+            if not live:
+                return False, "No reliable live prices right now; try again in a few seconds"
+            if st.rnd.seconds_left(now) <= self.cfg.no_trade_last_seconds:
+                return False, "The round is about to close; wait for the next one"
+            if not st.rnd.accepting_orders:
+                return False, "This market is not accepting orders"
+            risk = self.risk.check_manual(amount, now)
+            if not risk.allowed:
+                return False, risk.reason[:1].upper() + risk.reason[1:]
+            fill = self.account.quote_buy(books, side, amount)
+            if not fill.filled:
+                return False, f"Not filled: {fill.reason}"
+            pos_id = self.account.record_open(
+                source=MANUAL, rnd=st.rnd, side=side, fill=fill, amount_inr=amount,
+                take_profit=tp, stop_loss=sl, mode=self.mode, now_iso=self._iso(now), books=books,
+            )
+            return True, f"Bought {fill.shares:.2f} {side} @ {fill.avg_price * 100:.1f}¢ for ₹{amount:,.0f} (#{pos_id})"
+
+        if kind == "SELL":
+            pos = self.store.get_position(int(p["position_id"]))
+            if pos is None or pos["status"] != "OPEN":
+                return False, "That position is no longer open"
+            if not live or pos["slug"] != st.rnd.slug:
+                return False, "Its round has closed; it will settle when Polymarket resolves the market"
+            ok, msg = self.account.close(pos, books, SOLD, self._iso(now))
+            return ok, (msg[:1].upper() + msg[1:]) if ok else f"Could not sell: {msg}"
+
+        if kind == "SET_EXITS":
+            return self.account.set_exits(int(p["position_id"]), cents(p.get("take_profit")), cents(p.get("stop_loss")))
+
+        if kind == "BOT_SETTINGS":
+            tp, sl = cents(p.get("take_profit")), cents(p.get("stop_loss"))
+            problem = validate_exits(tp, sl)
+            if problem:
+                return False, problem
+            enabled = bool(p["enabled"])
+            self.store.set_setting("bot_enabled", "1" if enabled else "0")
+            self.store.set_setting("bot_take_profit", "" if tp is None else str(tp))
+            self.store.set_setting("bot_stop_loss", "" if sl is None else str(sl))
+            fmt = lambda v: "off" if v is None else f"{v * 100:g}¢"  # noqa: E731
+            return True, f"Auto-trader {'on' if enabled else 'paused'} · take profit {fmt(tp)} · stop loss {fmt(sl)}"
+
+        return False, f"Unknown action {kind!r}"
 
     def _warn_once(self, msg: str) -> None:
         if msg != self._last_error:

@@ -56,7 +56,8 @@ class Config:
     stake_inr: float = 1100.0          # fixed amount per traded round
     max_stake_inr: float = 1100.0      # hard ceiling; anything above is rejected
     max_daily_loss_inr: float = 5000.0
-    starting_balance_inr: float = 10000.0  # paper wallet; trades need free balance like a real account
+    starting_balance_inr: float = 100000.0  # paper wallet; trades need free balance like a real account
+    max_manual_order_inr: float = 25000.0   # cap per manual order from the dashboard (fat-finger guard)
     inr_per_usd: float = 96.0          # Polymarket settles in USDC; used to convert ₹ <-> $
 
     # --- Execution realism (paper fills) -----------------------------------
@@ -77,6 +78,10 @@ class Config:
     stop_file: Path = BASE_DIR / "STOP"
     status_path: Path = BASE_DIR / "status.json"  # heartbeat read by the dashboard
 
+    # --- Dashboard actions -------------------------------------------------
+    dashboard_key: str = ""              # if set, buttons on the dashboard need this key
+    command_max_age_seconds: float = 30.0  # a dashboard action older than this is refused, never run late
+
     # --- Optional browser mirror -------------------------------------------
     browser_enabled: bool = False
     browser_headless: bool = False
@@ -95,6 +100,8 @@ class Config:
             raise ConfigError("MAX_DAILY_LOSS_INR must be positive")
         if self.starting_balance_inr < self.stake_inr:
             raise ConfigError("STARTING_BALANCE_INR must cover at least one stake")
+        if self.max_manual_order_inr <= 0:
+            raise ConfigError("MAX_MANUAL_ORDER_INR must be positive")
         if self.inr_per_usd <= 0:
             raise ConfigError("INR_PER_USD must be positive")
         if not 0 < self.max_entry_price < 1:
@@ -116,7 +123,8 @@ def load_config(env_file: Path | None = None) -> Config:
         stake_inr=_float("STAKE_INR", 1100.0),
         max_stake_inr=_float("MAX_STAKE_INR", 1100.0),
         max_daily_loss_inr=_float("MAX_DAILY_LOSS_INR", 5000.0),
-        starting_balance_inr=_float("STARTING_BALANCE_INR", 10000.0),
+        starting_balance_inr=_float("STARTING_BALANCE_INR", 100000.0),
+        max_manual_order_inr=_float("MAX_MANUAL_ORDER_INR", 25000.0),
         inr_per_usd=_float("INR_PER_USD", 96.0),
         max_entry_price=_float("MAX_ENTRY_PRICE", 0.99),
         taker_fee_rate=_float("TAKER_FEE_RATE", 0.07),
@@ -130,6 +138,7 @@ def load_config(env_file: Path | None = None) -> Config:
         log_path=Path(_str("LOG_PATH", str(BASE_DIR / "bot.log"))),
         stop_file=Path(_str("STOP_FILE", str(BASE_DIR / "STOP"))),
         status_path=Path(_str("STATUS_PATH", str(BASE_DIR / "status.json"))),
+        dashboard_key=_str("DASHBOARD_KEY", ""),
         browser_enabled=_bool("BROWSER_ENABLED", False),
         browser_headless=_bool("BROWSER_HEADLESS", False),
         browser_crosscheck=_bool("BROWSER_CROSSCHECK", False),

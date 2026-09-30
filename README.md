@@ -63,7 +63,8 @@ when Polymarket resolves it: record the result and P/L, append a row to trades.c
 | `polymarket_api.py` | read-only client for Polymarket's public APIs |
 | `browser.py` | optional read-only browser window (Playwright) |
 | `report.py` | summary of results |
-| `dashboard.py` + `web/index.html` | read-only web dashboard |
+| `dashboard.py` + `web/index.html` | web dashboard and paper-trading desk |
+| `paper_account.py` | paper wallet: positions, manual orders, take profit / stop loss, settlement |
 | `app.py`, `Procfile`, `deploy_heroku.sh` | hosted mode: bot + dashboard in one process (Heroku) |
 | `wsgi.py`, `deploy_pythonanywhere.py` | dashboard as a WSGI app + PythonAnywhere deploy (PythonAnywhere) |
 | `config.py` / `.env` | settings |
@@ -108,7 +109,9 @@ The displayed 98% is the market's price, not a guarantee. The rule only makes mo
 | `STAKE_INR` | `1100` | fixed amount per traded round (no martingale, no increases) |
 | `MAX_STAKE_INR` | `1100` | hard ceiling |
 | `MAX_DAILY_LOSS_INR` | `5000` | stop trading for the day when reached |
-| `STARTING_BALANCE_INR` | `10000` | paper wallet; a trade needs this much free balance |
+| `STARTING_BALANCE_INR` | `100000` | paper wallet; a trade needs this much free balance |
+| `MAX_MANUAL_ORDER_INR` | `25000` | largest single order from the dashboard |
+| `DASHBOARD_KEY` | *(empty)* | if set, dashboard buttons need this key; set it for any shared URL |
 | `INR_PER_USD` | `96` | conversion for stake and P/L; update occasionally |
 | `MAX_ENTRY_PRICE` | `0.99` | never pay more than this per share |
 | `TAKER_FEE_RATE` | `0.07` | Polymarket crypto taker fee rate |
@@ -118,18 +121,29 @@ The displayed 98% is the market's price, not a guarantee. The rule only makes mo
 | `BROWSER_ENABLED` | `False` | open the current round in a browser window |
 | `BROWSER_CROSSCHECK` | `False` | require page values to match the API before trading |
 
-## Web dashboard
+## Web dashboard and paper trading
 
 ```bash
 python bot.py                      # terminal 1: the bot
 python dashboard.py                # terminal 2: open http://127.0.0.1:8000
 ```
 
-The dashboard shows the live round (UP/DOWN bars against the 98% line, countdown, what the rule decided), paper P/L, win rate against the break-even rate, today's loss against the daily limit, a cumulative P/L chart and the recent rounds. It refreshes every 2 seconds from the bot's `status.json` heartbeat and `trades.db`.
+The dashboard is a paper-trading desk on top of the live Polymarket BTC 5-minute market, with a **₹1,00,000 paper wallet**:
 
-The top of the page is a **paper wallet valued like a real account**: free cash, open trades at live prices, realized P/L, live P/L on open trades, and total equity. Each open position is marked every 2 seconds at the price Polymarket shows for the side held (how Polymarket's portfolio values it), next to what selling it at the best bid would fetch, and what it pays if it wins. Once the round resolves, the live P/L becomes realized P/L. The bot also refuses a trade the wallet can't afford.
+- **Paper wallet** at the top: equity valued at live prices, free cash, realized P/L, live P/L on open trades.
+- **Paper trade** ticket: Buy UP or Buy DOWN any amount (up to `MAX_MANUAL_ORDER_INR`), with an optional **take profit** and **stop loss** in cents.
+- **Auto-trader** panel: pause or resume the 98% rule bot, and set a take profit / stop loss for its trades. Its stake stays fixed at ₹1,100.
+- **Open positions**: every bot and manual trade, marked to the live price every 2 seconds, with **Sell now** and **Exits** (edit take profit / stop loss).
+- **Trade history**, an equity chart, and the rounds table showing what the 98% rule saw.
 
-The page is **read-only**: it has no buttons and no write endpoints, so sharing it can't start, stop or change the bot.
+How the simulation matches a real account:
+- Buys fill against the real ask side of the order book (plus matching bids on the other side, as Polymarket's exchange does), never above 99¢, and pay Polymarket's taker fee.
+- Sells (Sell now, take profit, stop loss) fill against the real bids and pay the taker fee.
+- **Take profit** fires when the best bid reaches your price. **Stop loss** fires when the displayed price falls to your price and then sells at the bids, so it can fill below the stop in a fast market, like a real stop order.
+- Anything still open when a round ends is paid out at resolution: ₹ equivalent of 1 USDC per share if its side won, 0 if it lost.
+- A trade needs free balance; the daily loss limit and emergency stop apply to manual orders too.
+
+Buttons never execute in the browser or the web server. They queue a command that the bot runs on its next poll (within ~2 s) against the live book, with the same checks as its own trades; commands older than 30 s are refused rather than run late. If `DASHBOARD_KEY` is set, the page asks for it before the first action (and remembers it in that browser).
 
 To show it to someone else temporarily, run a tunnel next to it on your laptop, for example:
 
@@ -157,7 +171,7 @@ Or with the Heroku CLI: `heroku create my-btc-paper-bot && git push heroku HEAD:
 Limits to know:
 - **Data resets on every restart.** Heroku's filesystem is temporary, and dynos restart at least once a day and on every deploy, so `trades.db` starts empty each time. Use Heroku for a demo; keep the long paper record on your own machine (or add a Heroku Postgres database).
 - **Eco dynos sleep** after 30 minutes without web traffic, which pauses the bot. Use a Basic dyno for 24/7 monitoring.
-- The app only reads Polymarket's public data and stays in paper mode. The public URL is read-only.
+- The app only reads Polymarket's public data and stays in paper mode. Set `DASHBOARD_KEY` (the deploy script does) so only you can use the trading buttons.
 
 ## Deploy to PythonAnywhere
 

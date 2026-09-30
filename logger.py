@@ -1,11 +1,16 @@
-"""Persistence: every round goes into SQLite (source of truth) and, once settled, trades.csv.
+"""Persistence: SQLite is the source of truth; settled rounds are also appended to trades.csv.
 
-The `orders` table has the round slug as PRIMARY KEY. Recording a fill inserts into it,
-so the database itself refuses a second order for the same round, even across restarts.
+- `rounds`    one row per 5-minute round the bot watched (what the 98% rule saw and decided)
+- `orders`    the bot's one-order-per-round guard: the round slug is the PRIMARY KEY, so the
+              database itself refuses a second bot order for the same round, even across restarts
+- `positions` every paper position (bot or manual) and its money: entry, exits, result, P/L
+- `settings`  auto-trader settings changed from the dashboard
+- `commands`  actions queued by the dashboard (buy, sell, edit exits); the bot runs them
 """
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import sqlite3
 import sys
@@ -19,8 +24,14 @@ ROUND_COLUMNS = [
     "decision", "fill_status", "reason", "signal_at", "seconds_left_at_signal",
     "stake_inr", "stake_usd", "entry_price", "shares", "fee_usd",
     "result", "profit_loss_usd", "profit_loss_inr", "settled_at", "updated_at",
-    # live valuation of an open paper position (price the website shows, and best bid)
-    "mark_price", "mark_bid", "mark_at",
+]
+
+POSITION_COLUMNS = [
+    "source", "slug", "question", "round_start", "round_end", "side", "opened_at", "mode",
+    "stake_inr", "stake_usd", "shares", "entry_price", "fee_usd",
+    "take_profit", "stop_loss", "mark_price", "mark_bid", "mark_at",
+    "status", "close_reason", "exit_price", "exit_value_usd", "exit_fee_usd", "closed_at",
+    "result", "pnl_usd", "pnl_inr",
 ]
 
 CSV_COLUMNS = [
@@ -43,6 +54,21 @@ CREATE TABLE IF NOT EXISTS orders (
     mode TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    {", ".join(POSITION_COLUMNS)}
+);
+CREATE INDEX IF NOT EXISTS positions_by_status ON positions (status, slug);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS commands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at REAL NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    message TEXT,
+    processed_at REAL
+);
 """
 
 
@@ -54,15 +80,17 @@ class TradeStore:
     def __init__(self, db_path: Path, csv_path: Path):
         self.db_path = Path(db_path)
         self.csv_path = Path(csv_path)
-        self.conn = sqlite3.connect(str(self.db_path))
+        self.conn = sqlite3.connect(str(self.db_path), timeout=10)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
         # Databases created by older versions lack newer columns; add them in place.
-        have = {r[1] for r in self.conn.execute("PRAGMA table_info(rounds)")}
-        for col in ROUND_COLUMNS:
-            if col not in have:
-                self.conn.execute(f"ALTER TABLE rounds ADD COLUMN {col}")
+        for table, columns in (("rounds", ROUND_COLUMNS), ("positions", POSITION_COLUMNS)):
+            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            for col in columns:
+                if col not in have:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
         self.conn.commit()
+        self._backfill_positions()
 
     def close(self) -> None:
         self.conn.close()
@@ -121,26 +149,126 @@ class TradeStore:
         if row:
             self._append_csv(row)
 
-    # --- risk queries -------------------------------------------------------
+    # --- money queries (all from positions) ------------------------------------
     def realized_pnl_inr(self, start_iso: str, end_iso: str) -> float:
+        """Realized P/L of positions whose round started in [start, end)."""
         cur = self.conn.execute(
-            "SELECT COALESCE(SUM(profit_loss_inr), 0) FROM rounds "
-            "WHERE profit_loss_inr IS NOT NULL AND round_start >= ? AND round_start < ?",
+            "SELECT COALESCE(SUM(pnl_inr), 0) FROM positions "
+            "WHERE pnl_inr IS NOT NULL AND round_start >= ? AND round_start < ?",
             (start_iso, end_iso),
         )
         return float(cur.fetchone()[0])
 
     def total_realized_inr(self) -> float:
-        cur = self.conn.execute("SELECT COALESCE(SUM(profit_loss_inr), 0) FROM rounds")
+        cur = self.conn.execute("SELECT COALESCE(SUM(pnl_inr), 0) FROM positions")
         return float(cur.fetchone()[0])
 
     def open_exposure_inr(self) -> float:
-        """Money tied up in unsettled paper trades: stakes plus their taker fees, in ₹."""
+        """Money tied up in open positions: stakes plus their buy fees, in ₹."""
         cur = self.conn.execute(
-            "SELECT COALESCE(SUM(stake_inr + COALESCE(fee_usd, 0) * stake_inr / stake_usd), 0) "
-            "FROM rounds WHERE fill_status = 'FILLED' AND result IS NULL AND stake_usd > 0"
+            "SELECT COALESCE(SUM(stake_inr + fee_usd * stake_inr / stake_usd), 0) "
+            "FROM positions WHERE status = 'OPEN'"
         )
         return float(cur.fetchone()[0])
+
+    # --- positions -----------------------------------------------------------
+    def insert_position(self, fields: dict) -> int:
+        row = {k: v for k, v in fields.items() if k in POSITION_COLUMNS}
+        row.setdefault("status", "OPEN")
+        cols = list(row)
+        with self.conn:
+            cur = self.conn.execute(
+                f"INSERT INTO positions ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+                [row[c] for c in cols],
+            )
+        return int(cur.lastrowid)
+
+    def update_position(self, pos_id: int, fields: dict) -> None:
+        row = {k: v for k, v in fields.items() if k in POSITION_COLUMNS}
+        if not row:
+            return
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE positions SET {', '.join(f'{c} = ?' for c in row)} WHERE id = ?",
+                [*row.values(), pos_id],
+            )
+
+    def get_position(self, pos_id: int) -> dict | None:
+        r = self.conn.execute("SELECT * FROM positions WHERE id = ?", (pos_id,)).fetchone()
+        return dict(r) if r else None
+
+    def open_positions(self, slug: str | None = None) -> list[dict]:
+        if slug is None:
+            cur = self.conn.execute("SELECT * FROM positions WHERE status = 'OPEN' ORDER BY id")
+        else:
+            cur = self.conn.execute("SELECT * FROM positions WHERE status = 'OPEN' AND slug = ? ORDER BY id", (slug,))
+        return [dict(r) for r in cur.fetchall()]
+
+    def ended_open_position_slugs(self, before_iso: str) -> list[str]:
+        cur = self.conn.execute(
+            "SELECT DISTINCT slug FROM positions WHERE status = 'OPEN' AND round_end <= ? ORDER BY round_end",
+            (before_iso,),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+    def bot_position(self, slug: str) -> dict | None:
+        r = self.conn.execute(
+            "SELECT * FROM positions WHERE source = 'BOT' AND slug = ? ORDER BY id LIMIT 1", (slug,)
+        ).fetchone()
+        return dict(r) if r else None
+
+    def _backfill_positions(self) -> None:
+        """Databases from before the positions table: copy the bot's trades into it once."""
+        if self.conn.execute("SELECT 1 FROM positions LIMIT 1").fetchone():
+            return
+        rows = self.conn.execute(
+            "SELECT * FROM rounds WHERE fill_status = 'FILLED' AND stake_usd > 0 ORDER BY round_start"
+        ).fetchall()
+        for r in map(dict, rows):
+            settled = r.get("profit_loss_inr") is not None
+            self.insert_position({
+                "source": "BOT", "slug": r["slug"], "question": r["question"],
+                "round_start": r["round_start"], "round_end": r["round_end"], "side": r["decision"],
+                "opened_at": r.get("signal_at") or r["round_start"], "mode": r.get("mode"),
+                "stake_inr": r["stake_inr"], "stake_usd": r["stake_usd"], "shares": r["shares"],
+                "entry_price": r["entry_price"], "fee_usd": r.get("fee_usd") or 0.0,
+                "status": "SETTLED" if settled else "OPEN",
+                "close_reason": "RESOLVED" if settled else None,
+                "closed_at": r.get("settled_at") if settled else None,
+                "result": r.get("result"), "pnl_usd": r.get("profit_loss_usd"), "pnl_inr": r.get("profit_loss_inr"),
+            })
+
+    # --- settings ------------------------------------------------------------
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        r = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return r[0] if r else default
+
+    def set_setting(self, key: str, value: str | None) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+    # --- dashboard commands --------------------------------------------------
+    def enqueue_command(self, kind: str, payload: dict, now: float) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO commands (created_at, kind, payload) VALUES (?, ?, ?)",
+                (now, kind, json.dumps(payload)),
+            )
+        return int(cur.lastrowid)
+
+    def pending_commands(self) -> list[dict]:
+        cur = self.conn.execute("SELECT * FROM commands WHERE status = 'PENDING' ORDER BY id")
+        return [{**dict(r), "payload": json.loads(r["payload"])} for r in cur.fetchall()]
+
+    def finish_command(self, cmd_id: int, ok: bool, message: str, now: float) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE commands SET status = ?, message = ?, processed_at = ? WHERE id = ?",
+                ("DONE" if ok else "FAILED", message, now, cmd_id),
+            )
 
     # --- csv -----------------------------------------------------------------
     def _append_csv(self, row: dict) -> None:

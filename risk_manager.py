@@ -3,8 +3,10 @@
 - Emergency stop: a file named STOP next to the bot (create it with `python bot.py --stop`).
 - Fixed stake: anything other than a positive amount <= MAX_STAKE_INR is refused.
 - Duplicate protection: one order per round, checked in memory and in the database.
-- Daily loss limit: a trade is refused if losing it could take today's realized loss,
-  plus stakes still waiting for a result, past MAX_DAILY_LOSS_INR.
+- Daily loss limit: a bot trade is refused if losing it could take today's realized loss,
+  plus money in open positions, past MAX_DAILY_LOSS_INR. Manual orders are refused once
+  today's realized loss has reached the limit.
+- Paper balance: no trade the wallet can't pay for.
 """
 from __future__ import annotations
 
@@ -78,6 +80,22 @@ class RiskManager:
                 False,
                 f"worst case ₹{worst_case:,.2f} would breach daily loss limit ₹{self.cfg.max_daily_loss_inr:,.2f}",
             )
+        return RiskDecision(True, "ok")
+
+    def check_manual(self, amount_inr: float, now_ts: float) -> RiskDecision:
+        """Checks for an order placed by hand from the dashboard."""
+        if self.emergency_stop_active():
+            return RiskDecision(False, "emergency stop is active")
+        if not amount_inr > 0:
+            return RiskDecision(False, "amount must be more than ₹0")
+        if amount_inr > self.cfg.max_manual_order_inr:
+            return RiskDecision(False, f"amount is above the ₹{self.cfg.max_manual_order_inr:,.0f} per-order limit")
+        cash = self.cash_inr()
+        if amount_inr > cash:
+            return RiskDecision(False, f"not enough paper balance (₹{cash:,.2f} free)")
+        realized = self.realized_today_inr(now_ts)
+        if realized <= -self.cfg.max_daily_loss_inr:
+            return RiskDecision(False, f"daily loss limit reached (₹{realized:,.2f} today)")
         return RiskDecision(True, "ok")
 
     def mark_traded(self, slug: str) -> None:

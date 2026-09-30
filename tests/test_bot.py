@@ -271,35 +271,55 @@ def test_dashboard_state_reflects_bot(env, monkeypatch):
     assert "window.__SNAPSHOT__ = {" in snap and snap.count("window.__SNAPSHOT__ =") == 1
 
 
-def test_open_position_is_marked_to_live_price_and_wallet_matches(env):
-    from report import load_rounds, wallet
+def add_position(store, **kw):
+    """A position row for risk/wallet tests."""
+    row = {"source": "BOT", "slug": "s", "question": "q", "round_start": "2026-09-30T18:45:00+00:00",
+           "round_end": "2026-09-30T18:50:00+00:00", "side": "UP", "opened_at": "2026-09-30T18:46:00+00:00",
+           "stake_inr": 1100.0, "stake_usd": 11.0, "shares": 11.0 / 0.99, "entry_price": 0.99, "fee_usd": 0.0,
+           "status": "OPEN"}
+    row.update(kw)
+    return store.insert_position(row)
 
+
+def open_wallet(cfg, now_iso):
+    import sqlite3
+
+    from paper_account import wallet_summary
+    conn = sqlite3.connect(cfg.db_path)
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute("SELECT * FROM positions ORDER BY id")]
+    conn.close()
+    return wallet_summary(rows, cfg.starting_balance_inr, now_iso)
+
+
+def test_open_position_is_marked_to_live_price_and_wallet_matches(env):
     cfg, client, store, clock, bot = env
-    set_books(client, 0.97, 0.99, 0.01, 0.03)  # UP 98% -> buy 11.11 shares at 0.99
+    start = cfg.starting_balance_inr
+    set_books(client, 0.97, 0.99, 0.01, 0.03)  # UP 98% -> bot buys 11.11 shares at 0.99
     bot.tick()
     set_books(client, 0.98, 0.99, 0.01, 0.02)  # UP now displays 98.5%, best bid 0.98
     clock.t += 2
     bot.tick()
-    row = store.get_round(slug_for(START))
-    assert (row["mark_price"], row["mark_bid"]) == (0.985, 0.98)
+    (pos_row,) = store.open_positions()
+    assert (pos_row["source"], pos_row["mark_price"], pos_row["mark_bid"]) == ("BOT", 0.985, 0.98)
 
     shares = 11.0 / 0.99
-    w = wallet(load_rounds(cfg.db_path), cfg.starting_balance_inr, "2026-09-30T18:47:00+00:00")
+    w = open_wallet(cfg, "2026-09-30T18:47:00+00:00")
     (pos,) = w["positions"]
     assert pos["value_inr"] == pytest.approx(shares * 0.985 * 100, abs=0.01)
     assert pos["sell_value_inr"] == pytest.approx(shares * 0.98 * 100, abs=0.01)
     assert pos["unrealized_inr"] == pytest.approx(shares * 0.985 * 100 - 1100, abs=0.01)
     assert pos["status"] == "live"
-    assert w["cash_inr"] == pytest.approx(10000 - 1100)
+    assert w["cash_inr"] == pytest.approx(start - 1100)
     assert w["total_pnl_inr"] == pytest.approx(pos["unrealized_inr"], abs=0.01)
 
     settle_market(client, '["1", "0"]')
     clock.t = START + 400
     bot.tick()
-    w = wallet(load_rounds(cfg.db_path), cfg.starting_balance_inr, "2026-09-30T19:00:00+00:00")
+    w = open_wallet(cfg, "2026-09-30T19:00:00+00:00")
     assert w["positions"] == []
-    assert w["equity_inr"] == pytest.approx(10000 + (shares - 11.0) * 100, abs=0.01)
-    assert w["total_pnl_inr"] == w["realized_inr"]
+    assert w["equity_inr"] == pytest.approx(start + (shares - 11.0) * 100, abs=0.01)
+    assert w["total_pnl_inr"] == w["realized_inr"] and w["wins"] == 1
 
 
 def test_no_trade_without_paper_balance(tmp_path):
@@ -308,24 +328,33 @@ def test_no_trade_without_paper_balance(tmp_path):
     store = TradeStore(cfg.db_path, cfg.csv_path)
     risk = RiskManager(cfg, store)
     assert risk.check_trade("a", 1100, START).allowed
-    store.upsert_round({"slug": "a", "fill_status": "FILLED", "stake_inr": 1100.0, "stake_usd": 11.0,
-                        "fee_usd": 0.0, "round_start": "2026-09-30T18:45:00+00:00"})
+    add_position(store, slug="a")
     decision = risk.check_trade("b", 1100, START)
     assert not decision.allowed and "paper balance" in decision.reason
+    assert not risk.check_manual(500, START).allowed
     store.close()
 
 
-def test_old_database_gets_new_columns(tmp_path):
+def test_old_database_is_migrated_and_bot_trades_backfilled(tmp_path):
     import sqlite3
 
     conn = sqlite3.connect(tmp_path / "old.db")
-    conn.execute("CREATE TABLE rounds (slug TEXT PRIMARY KEY, decision)")
+    conn.execute("CREATE TABLE rounds (slug TEXT PRIMARY KEY, question, round_start, round_end, decision, "
+                 "fill_status, stake_inr, stake_usd, shares, entry_price, fee_usd, result, profit_loss_usd, "
+                 "profit_loss_inr, settled_at)")
+    conn.execute("INSERT INTO rounds VALUES ('r1', 'q', '2026-09-30T18:00:00+00:00', '2026-09-30T18:05:00+00:00', "
+                 "'UP', 'FILLED', 1100, 11.0, 11.11, 0.99, 0.0, 'UP', 0.11, 10.35, '2026-09-30T18:06:00+00:00')")
     conn.commit()
     conn.close()
     store = TradeStore(tmp_path / "old.db", tmp_path / "t.csv")
-    store.upsert_round({"slug": "x", "mark_price": 0.5})
-    assert store.get_round("x")["mark_price"] == 0.5
+    (pos,) = [dict(r) for r in store.conn.execute("SELECT * FROM positions")]
+    assert (pos["source"], pos["status"], pos["pnl_inr"]) == ("BOT", "SETTLED", 10.35)
+    assert store.total_realized_inr() == 10.35
     store.close()
+    TradeStore(tmp_path / "old.db", tmp_path / "t.csv").close()  # second open: no duplicate backfill
+    conn = sqlite3.connect(tmp_path / "old.db")
+    assert conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 1
+    conn.close()
 
 
 def test_loss_is_full_stake(env):
@@ -422,13 +451,13 @@ def test_daily_loss_limit_and_worst_case(tmp_path):
     assert not risk.check_trade("a", 1101, now).allowed
     assert not risk.check_trade("a", 0, now).allowed
     for i in range(4):  # four settled losses today: -4400
-        store.upsert_round({"slug": f"l{i}", "round_start": "2026-09-30T18:00:00+00:00",
-                            "fill_status": "FILLED", "profit_loss_inr": -1100.0, "result": "DOWN"})
+        add_position(store, slug=f"l{i}", round_start="2026-09-30T18:00:00+00:00", status="SETTLED", pnl_inr=-1100.0)
     decision = risk.check_trade("b", 1100, now)
     assert not decision.allowed and "worst case" in decision.reason
-    store.upsert_round({"slug": "l4", "round_start": "2026-09-30T18:05:00+00:00",
-                        "fill_status": "FILLED", "profit_loss_inr": -1100.0, "result": "DOWN"})
+    assert risk.check_manual(1000, now).allowed  # manual orders stop only once the limit is actually hit
+    add_position(store, slug="l4", round_start="2026-09-30T18:05:00+00:00", status="SETTLED", pnl_inr=-1100.0)
     assert risk.daily_limit_reached(now)
+    assert "daily loss" in risk.check_manual(1000, now).reason
     store.close()
 
 
@@ -437,7 +466,7 @@ def test_daily_loss_day_boundary_is_local_time(tmp_path):
     cfg = Config(db_path=tmp_path / "t.db", csv_path=tmp_path / "t.csv", stop_file=tmp_path / "STOP",
                  timezone="Asia/Kolkata")
     store = TradeStore(cfg.db_path, cfg.csv_path)
-    store.upsert_round({"slug": "old", "round_start": "2026-09-30T18:00:00+00:00", "profit_loss_inr": -5000.0})
+    add_position(store, slug="old", round_start="2026-09-30T18:00:00+00:00", status="SETTLED", pnl_inr=-5000.0)
     risk = RiskManager(cfg, store)
     assert risk.daily_limit_reached(START - 3600)       # 23:15 IST Sep 30: same day
     assert not risk.daily_limit_reached(START + 100)    # 00:16 IST Oct 1: new day
@@ -449,3 +478,145 @@ def test_orders_table_rejects_duplicates(tmp_path):
     assert store.record_order("x", "UP", 1100, "PAPER", {})
     assert not store.record_order("x", "UP", 1100, "PAPER", {})
     store.close()
+
+
+# --- paper trading from the dashboard -----------------------------------------------------------
+def command(bot, store, clock, kind, **payload):
+    cmd_id = store.enqueue_command(kind, payload, clock.t)
+    bot.tick()
+    row = store.conn.execute("SELECT status, message FROM commands WHERE id = ?", (cmd_id,)).fetchone()
+    return row["status"], row["message"]
+
+
+def test_simulate_sell_walks_bids_and_complement():
+    from quotes import simulate_sell, with_complement_bids
+
+    up = parse_book(raw_book(bids=[(0.60, 5)], asks=[]))
+    down = parse_book(raw_book(asks=[(0.45, 10)]))  # a DOWN seller at 45c acts like an UP buyer at 55c
+    merged = with_complement_bids(up, down)
+    assert merged.bids == [(0.60, 5), (0.55, 10)]
+    sale = simulate_sell(merged, 8, fee_rate=0.0)
+    assert sale.filled and sale.proceeds_usd == pytest.approx(5 * 0.60 + 3 * 0.55)
+    assert not simulate_sell(merged, 100, 0.0).filled
+
+
+def test_manual_buy_with_take_profit_fires_on_bid(env):
+    cfg, client, store, clock, bot = env
+    set_books(client, 0.59, 0.60, 0.40, 0.41)  # no 98% signal: bot stays out
+    status, msg = command(bot, store, clock, "BUY", side="UP", amount_inr=6000, take_profit=70, stop_loss=40)
+    assert status == "DONE", msg
+    (pos,) = store.open_positions()
+    assert (pos["source"], pos["side"], pos["take_profit"], pos["stop_loss"]) == ("MANUAL", "UP", 0.70, 0.40)
+    assert pos["entry_price"] == pytest.approx(0.60)
+
+    set_books(client, 0.72, 0.73, 0.27, 0.28)  # best bid 0.72 >= take profit 0.70
+    clock.t += 2
+    bot.tick()
+    closed = store.get_position(pos["id"])
+    assert (closed["status"], closed["close_reason"]) == ("CLOSED", "TAKE_PROFIT")
+    shares = 60 / 0.60  # ₹6000 at ₹100/$ = $60
+    assert closed["pnl_inr"] == pytest.approx((shares * 0.72 - 60) * 100, abs=0.01)
+    assert not store.has_order(slug_for(START))  # manual trades never use the bot's round slot
+
+
+def test_stop_loss_sells_at_the_bids_with_slippage(env):
+    cfg, client, store, clock, bot = env
+    set_books(client, 0.59, 0.60, 0.40, 0.41)
+    command(bot, store, clock, "BUY", side="UP", amount_inr=3000, stop_loss=45)
+    set_books(client, 0.40, 0.42, 0.58, 0.60)  # UP displays 41% <= 45% stop: sells at bid 0.40
+    clock.t += 2
+    bot.tick()
+    (pos,) = [dict(r) for r in store.conn.execute("SELECT * FROM positions")]
+    assert (pos["status"], pos["close_reason"], pos["exit_price"]) == ("CLOSED", "STOP_LOSS", 0.40)
+    assert pos["pnl_inr"] == pytest.approx((50 * 0.40 - 30) * 100, abs=0.01)
+
+
+def test_sell_now_and_edit_exits(env):
+    cfg, client, store, clock, bot = env
+    set_books(client, 0.59, 0.60, 0.40, 0.41)
+    command(bot, store, clock, "BUY", side="DOWN", amount_inr=2000)
+    (pos,) = store.open_positions()
+    assert command(bot, store, clock, "SET_EXITS", position_id=pos["id"], take_profit=90, stop_loss=20)[0] == "DONE"
+    assert store.get_position(pos["id"])["stop_loss"] == 0.20
+    status, msg = command(bot, store, clock, "SET_EXITS", position_id=pos["id"], take_profit=10, stop_loss=20)
+    assert status == "FAILED" and "above stop loss" in msg
+    status, msg = command(bot, store, clock, "SELL", position_id=pos["id"])
+    assert status == "DONE", msg
+    assert store.get_position(pos["id"])["close_reason"] == "SOLD"
+    assert command(bot, store, clock, "SELL", position_id=pos["id"])[0] == "FAILED"  # already closed
+
+
+def test_manual_orders_are_checked(env):
+    cfg, client, store, clock, bot = env
+    set_books(client, 0.59, 0.60, 0.40, 0.41)
+    assert "per-order limit" in command(bot, store, clock, "BUY", side="UP", amount_inr=30000)[1]
+    assert command(bot, store, clock, "BUY", side="SIDEWAYS", amount_inr=100)[0] == "FAILED"
+    assert "between 1" in command(bot, store, clock, "BUY", side="UP", amount_inr=100, take_profit=120)[1]
+    old = store.enqueue_command("BUY", {"side": "UP", "amount_inr": 100}, clock.t - 60)
+    bot.tick()
+    assert store.conn.execute("SELECT status FROM commands WHERE id = ?", (old,)).fetchone()[0] == "FAILED"
+    clock.t = START + 298  # last seconds of the round
+    assert "about to close" in command(bot, store, clock, "BUY", side="UP", amount_inr=100)[1]
+    assert store.open_positions() == []
+
+
+def test_auto_trader_pause_and_default_exits(env):
+    cfg, client, store, clock, bot = env
+    set_books(client, 0.59, 0.60, 0.40, 0.41)
+    assert command(bot, store, clock, "BOT_SETTINGS", enabled=False, take_profit="", stop_loss=80)[0] == "DONE"
+    set_books(client, 0.97, 0.99, 0.01, 0.03)  # 98% signal while paused: no trade
+    clock.t += 2
+    bot.tick()
+    assert not store.has_order(slug_for(START)) and "paused" in bot.state.reason
+    command(bot, store, clock, "BOT_SETTINGS", enabled=True, take_profit="", stop_loss=80)
+    (pos,) = store.open_positions()
+    assert (pos["source"], pos["stop_loss"], pos["take_profit"]) == ("BOT", 0.80, None)
+
+
+def test_bot_stop_loss_sets_round_pnl(env):
+    cfg, client, store, clock, bot = env
+    store.set_setting("bot_stop_loss", "0.8")
+    set_books(client, 0.97, 0.99, 0.01, 0.03)
+    bot.tick()
+    set_books(client, 0.70, 0.72, 0.28, 0.30)  # UP collapses to 71%: stop loss sells at 0.70
+    clock.t += 2
+    bot.tick()
+    pos = store.bot_position(slug_for(START))
+    assert pos["close_reason"] == "STOP_LOSS"
+    settle_market(client, '["0", "1"]')  # DOWN won; the stop saved most of the stake
+    clock.t = START + 400
+    bot.tick()
+    row = store.get_round(slug_for(START))
+    assert row["result"] == "DOWN" and row["profit_loss_inr"] == pos["pnl_inr"]
+    assert pos["pnl_inr"] > -400  # instead of -1,100
+
+
+def test_dashboard_actions_need_the_key_and_reach_the_bot(env):
+    import dashboard
+
+    cfg, client, store, clock, bot = env
+    locked = replace(cfg, dashboard_key="s3cret")
+    body = b'{"kind": "BUY", "side": "UP", "amount_inr": 1000, "take_profit": "", "stop_loss": 40}'
+    assert dashboard.submit_command(locked, body, "")[0] == 401
+    assert dashboard.submit_command(locked, body, "wrong")[0] == 401
+    assert dashboard.submit_command(locked, b'{"kind": "DELETE_ALL"}', "s3cret")[0] == 400
+    assert dashboard.submit_command(locked, b"not json", "s3cret")[0] == 400
+    code, out = dashboard.submit_command(locked, body, "s3cret")
+    assert code == 202
+    set_books(client, 0.59, 0.60, 0.40, 0.41)
+    with store.conn:  # commands are stamped with real time; move it onto the test clock
+        store.conn.execute("UPDATE commands SET created_at = ? WHERE id = ?", (clock.t, out["id"]))
+    bot.tick()
+    (pos,) = store.open_positions()
+    assert (pos["source"], pos["stake_inr"], pos["stop_loss"]) == ("MANUAL", 1000.0, 0.40)
+
+
+def test_position_left_open_by_an_already_settled_round_is_paid_out(env):
+    cfg, client, store, clock, bot = env
+    pos_id = add_position(store, slug="old-round", side="DOWN", round_end="2026-09-30T18:40:00+00:00")
+    store.upsert_round({"slug": "old-round", "round_end": "2026-09-30T18:40:00+00:00", "result": "DOWN"})
+    set_books(client, 0.59, 0.60, 0.40, 0.41)
+    bot.tick()
+    pos = store.get_position(pos_id)
+    assert (pos["status"], pos["result"]) == ("SETTLED", "DOWN")
+    assert pos["pnl_inr"] == pytest.approx((11.0 / 0.99 - 11.0) * 100, abs=0.01)

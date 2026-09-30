@@ -65,6 +65,7 @@
   }
 
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { margin: 0; }
   body {
     background: var(--surface-0);
@@ -177,6 +178,48 @@
   .h-note { margin: -4px 0 12px; font-size: 12px; color: var(--text-muted); max-width: 90ch; }
   .status-live { color: var(--good-text); font-weight: 600; }
 
+  /* controls */
+  .field { display: grid; gap: 4px; font-size: 12px; color: var(--text-secondary); font-weight: 600; min-width: 0; }
+  .field .opt { font-weight: 400; color: var(--text-muted); }
+  input[type="number"], input[type="password"] {
+    font: inherit; font-size: 15px; font-weight: 600; color: var(--text-primary); background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%; min-width: 0;
+  }
+  input:focus-visible, button:focus-visible { outline: 2px solid var(--series-up); outline-offset: 1px; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; }
+  button:disabled { cursor: not-allowed; opacity: .5; }
+  .primary { background: var(--text-primary); color: var(--surface-1); border: 0; padding: 11px 14px; font-weight: 650; width: 100%; }
+  .secondary { background: var(--surface-2); color: var(--text-primary); border: 1px solid var(--border); padding: 9px 14px; font-weight: 600; }
+  .ghost { background: transparent; color: var(--text-primary); border: 1px solid var(--border); padding: 6px 12px; font-weight: 600; }
+  .ticket form { display: grid; gap: 12px; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .side-btn { border: 1px solid var(--border); background: var(--surface-2); color: var(--text-primary); padding: 10px 8px; font-weight: 650; display: flex; justify-content: center; gap: 6px; }
+  .side-btn span { font-weight: 500; color: var(--text-secondary); }
+  .side-btn.up[aria-checked="true"] { border-color: var(--series-up); box-shadow: inset 0 0 0 1px var(--series-up); }
+  .side-btn.down[aria-checked="true"] { border-color: var(--series-down); box-shadow: inset 0 0 0 1px var(--series-down); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: -4px; }
+  .chips button { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-secondary); padding: 3px 10px; font-size: 12px; border-radius: 999px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .est { font-size: 13px; color: var(--text-secondary); background: var(--surface-2); border-radius: 8px; padding: 8px 10px; }
+  .form-msg { font-size: 13px; min-height: 1.2em; }
+  .form-msg.ok { color: var(--good-text); }
+  .form-msg.err { color: var(--critical-text); }
+  .auto-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+  .auto-state { font-weight: 650; font-size: 16px; }
+  .auto-state.on::before { content: "● "; color: var(--good); }
+  .auto-state.off::before { content: "❚❚ "; color: var(--text-muted); font-size: 12px; }
+  #auto-save { margin-top: 12px; }
+  .row-actions { display: flex; gap: 6px; }
+  .row-actions button, .edit-cell button { font-size: 12px; padding: 4px 8px; }
+  .edit-cell input { width: 70px; padding: 4px 6px; font-size: 13px; }
+  .src { font-size: 11px; font-weight: 700; letter-spacing: .04em; color: var(--text-muted); }
+  .toast {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    max-width: min(560px, calc(100% - 32px)); background: var(--text-primary); color: var(--surface-1);
+    padding: 10px 14px; border-radius: 10px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,.2); z-index: 5;
+  }
+  .toast.err { background: var(--critical); color: #fff; }
+
   footer { margin-top: 18px; font-size: 12px; color: var(--text-muted); }
   .banner { margin-bottom: 14px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); font-size: 13px; display: none; }
 </style>
@@ -231,10 +274,64 @@
       <div class="round-meta" id="round-meta"></div>
     </section>
 
+    <section class="card ticket" aria-labelledby="ticket-h">
+      <h2 id="ticket-h">Paper trade</h2>
+      <form id="ticket-form" novalidate>
+        <div class="seg" role="radiogroup" aria-label="Side">
+          <button type="button" class="side-btn up" id="side-UP" role="radio" aria-checked="true">Buy UP <span class="num" id="ask-UP">–</span></button>
+          <button type="button" class="side-btn down" id="side-DOWN" role="radio" aria-checked="false">Buy DOWN <span class="num" id="ask-DOWN">–</span></button>
+        </div>
+        <label class="field">Amount (₹)
+          <input id="amt" type="number" inputmode="decimal" min="1" step="1" value="1100" required>
+        </label>
+        <div class="chips" id="chips">
+          <button type="button" data-amt="1100">₹1,100</button>
+          <button type="button" data-amt="5000">₹5,000</button>
+          <button type="button" data-amt="10000">₹10,000</button>
+          <button type="button" data-amt="25000">₹25,000</button>
+        </div>
+        <div class="two">
+          <label class="field">Take profit (¢) <span class="opt">optional</span>
+            <input id="tp" type="number" inputmode="decimal" min="1" max="99" step="0.5" placeholder="off">
+          </label>
+          <label class="field">Stop loss (¢) <span class="opt">optional</span>
+            <input id="sl" type="number" inputmode="decimal" min="1" max="99" step="0.5" placeholder="off">
+          </label>
+        </div>
+        <div class="est" id="est">Enter an amount to see the estimate.</div>
+        <label class="field key-field" id="key-field" hidden>Dashboard key
+          <input id="key" type="password" autocomplete="off" placeholder="needed to place trades">
+        </label>
+        <button type="submit" class="primary" id="place">Place paper order</button>
+        <div class="form-msg" id="ticket-msg" role="status" aria-live="polite"></div>
+      </form>
+    </section>
+  </div>
+
+  <div class="grid-top section">
+    <section class="card" aria-labelledby="auto-h">
+      <h2 id="auto-h">Auto-trader · 98% rule</h2>
+      <div class="auto-head">
+        <span class="auto-state" id="auto-state">–</span>
+        <button type="button" class="ghost" id="auto-toggle">–</button>
+      </div>
+      <p class="h-note">When UP or DOWN reaches 98%, the bot buys a fixed ₹<span id="auto-stake">1,100</span> on that side, once per round. Exits below apply to its new trades; edit an open trade's exits in the positions table.</p>
+      <div class="two">
+        <label class="field">Take profit (¢) <span class="opt">optional</span>
+          <input id="auto-tp" type="number" inputmode="decimal" min="1" max="99" step="0.5" placeholder="off">
+        </label>
+        <label class="field">Stop loss (¢) <span class="opt">optional</span>
+          <input id="auto-sl" type="number" inputmode="decimal" min="1" max="99" step="0.5" placeholder="off">
+        </label>
+      </div>
+      <button type="button" class="secondary" id="auto-save">Save exits</button>
+      <div class="form-msg" id="auto-msg" role="status" aria-live="polite"></div>
+    </section>
+
     <section class="card" aria-labelledby="res-h">
       <h2 id="res-h">Paper results</h2>
       <div class="tiles">
-        <div class="tile"><div class="k">Realized P/L</div><div class="v num" id="t-pnl">–</div><div class="s" id="t-pnl-s"></div></div>
+        <div class="tile"><div class="k">Auto-trader P/L</div><div class="v num" id="t-pnl">–</div><div class="s" id="t-pnl-s"></div></div>
         <div class="tile"><div class="k">Win rate</div><div class="v num" id="t-win">–</div><div class="s" id="t-win-s"></div></div>
         <div class="tile"><div class="k">98% signals</div><div class="v num" id="t-sig">–</div><div class="s" id="t-sig-s"></div></div>
         <div class="tile"><div class="k">Rounds watched</div><div class="v num" id="t-rounds">–</div><div class="s" id="t-rounds-s"></div></div>
@@ -250,14 +347,14 @@
 
   <section class="card section" aria-labelledby="pos-h">
     <h2 id="pos-h">Open positions</h2>
-    <p class="h-note">Each open paper trade is valued the way Polymarket's portfolio values it: shares × the price shown for that side. "Sell now" is what the best bid would pay if you sold immediately. The position pays ₹<span id="pos-rate">96</span> per share (1 USDC) if its side wins and ₹0 if it loses.</p>
+    <p class="h-note">Valued the way Polymarket's portfolio values them: shares × the price shown for that side. "Sell now" is roughly what the best bids would pay. A share pays ₹<span id="pos-rate">96</span> (1 USDC) if its side wins and ₹0 if it loses. Take profit sells when the best bid reaches it; stop loss sells at the bids once the price falls to it, and can fill below it.</p>
     <div class="table-scroll">
       <table>
         <thead><tr>
-          <th>Round (ET)</th><th>Side</th><th class="r">Shares</th><th class="r">Entry</th><th class="r">Live price</th>
-          <th class="r">Value</th><th class="r">Sell now</th><th class="r">Live P/L</th><th class="r">If it wins</th><th>Status</th>
+          <th>Trade</th><th>Round (ET)</th><th>Side</th><th class="r">Shares</th><th class="r">Entry</th><th class="r">Live</th>
+          <th class="r">Value</th><th class="r">Live P/L</th><th class="r">If it wins</th><th class="r">Exits (TP / SL)</th><th>Actions</th>
         </tr></thead>
-        <tbody id="pos-rows"><tr><td colspan="10" class="empty">No open positions</td></tr></tbody>
+        <tbody id="pos-rows"><tr><td colspan="11" class="empty">No open positions</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -270,8 +367,21 @@
     </div>
   </section>
 
+  <section class="card section" aria-labelledby="hist-h">
+    <h2 id="hist-h">Trade history</h2>
+    <div class="table-scroll">
+      <table>
+        <thead><tr>
+          <th>Closed</th><th>Trade</th><th>Round (ET)</th><th>Side</th><th class="r">Amount</th><th class="r">Entry</th>
+          <th class="r">Exit</th><th>How it ended</th><th class="r">P/L</th>
+        </tr></thead>
+        <tbody id="hist-rows"><tr><td colspan="9" class="empty">No closed trades yet</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="card section" aria-labelledby="rounds-h">
-    <h2 id="rounds-h">Recent rounds</h2>
+    <h2 id="rounds-h">Recent rounds · what the 98% rule saw</h2>
     <div class="table-scroll">
       <table>
         <thead><tr>
@@ -284,10 +394,11 @@
   </section>
 
   <footer>
-    Read-only view of a paper-trading bot. Rule: trade only when UP or DOWN is at least 98%, fixed ₹<span id="f-stake">1,100</span> stake.
+    Paper trading only: no real orders are ever placed. Prices, fills and fees come from Polymarket's live order books. Auto-trader rule: trade only when UP or DOWN is at least 98%, fixed ₹<span id="f-stake">1,100</span> stake.
     At a 99¢ entry a win pays about ₹10 and a loss costs about ₹1,100, so the rule needs a win rate above ~99% to break even.
   </footer>
 </div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <script>
 (() => {
@@ -312,6 +423,7 @@
     catch { return iso; }
   };
   const etLabel = (q) => { const m = /-\s*(.+ET)$/.exec(q || ""); return m ? m[1] : (q || ""); };
+  const shortRound = (q) => etLabel(q).replace(/^[A-Za-z]+ \d+,\s*/, "");  // "4:05PM-4:10PM ET"
 
   // ---------- live round ----------
   function renderRound(data) {
@@ -339,7 +451,7 @@
       icon = "!"; title = "Conflict — both sides read ≥ " + thr + "%"; sub = "Data problem; no trade this round.";
     } else if (r.fill_status === "FILLED") {
       icon = "✓"; title = `Paper trade: ${side}`; sub = `Entered at UP ${pct(r.up_percentage)} / DOWN ${pct(r.down_percentage)} with ${Math.round(r.seconds_left_at_signal ?? 0)}s left. Result after the round resolves.`;
-      const pos = (data.wallet.positions || []).find((p) => p.slug === r.slug);
+      const pos = (data.wallet.positions || []).find((p) => p.slug === r.slug && p.source === "BOT");
       if (pos) {
         title += ` · live P/L ${inr(pos.unrealized_inr, true)}`;
         sub = `Held ${side} is priced at ${(pos.mark_price * 100).toFixed(1)}¢ now (entry ${(pos.entry_price * 100).toFixed(1)}¢). ` + sub;
@@ -439,7 +551,7 @@
         g += `<text x="${x(i)}" y="${below ? y(p.equity) + 20 : y(p.equity) - 12}" text-anchor="end">now (live)</text>`;
         return;
       }
-      const won = p.side === p.result;
+      const won = p.pnl > 0;
       g += `<circle cx="${x(i)}" cy="${y(p.equity)}" r="4.5" fill="${won ? "var(--good)" : "var(--critical)"}" stroke="var(--surface-1)" stroke-width="2"/>`;
     });
     g += `<text x="${pad.l}" y="${H - 6}">start ₹${start.toLocaleString("en-IN")}</text>`;
@@ -460,8 +572,8 @@
           `<div>Equity: <b>${inr(p.equity)}</b></div>` +
           `<div>Live P/L on open trades: <b class="${w.unrealized_inr >= 0 ? "pos" : "neg"}">${inr(w.unrealized_inr, true)}</b></div>`;
       } else {
-        const won = p.side === p.result;
-        tip.innerHTML = `<div class="t-h">Trade ${i} · ${esc(p.side)} → ${won ? "✓ won" : "✗ lost"}</div>` +
+        const how = p.reason === "RESOLVED" ? (p.pnl > 0 ? "✓ won" : "✗ lost") : (endLabel[p.reason] || p.reason);
+        tip.innerHTML = `<div class="t-h">${srcLabel(p.source)} #${p.id} · ${esc(p.side)} → ${esc(how)}</div>` +
           `<div>${esc(dateTimeFmt(p.t))}</div><div>This trade: <b class="${p.pnl >= 0 ? "pos" : "neg"}">${inr(p.pnl, true)}</b></div>` +
           `<div>Equity after: <b>${inr(p.equity)}</b></div>`;
       }
@@ -489,24 +601,209 @@
     const un = $("w-unreal"); un.textContent = w.positions.length ? inr(w.unrealized_inr, true) : "—"; un.className = "num " + signCls(w.unrealized_inr);
     $("pos-rate").textContent = Math.round(data.rules.inr_per_usd);
 
-    const rows = w.positions;
+  }
+
+  // ---------- positions (keyed so an exits edit in progress survives the 2s refresh) ----------
+  const editing = {};  // position id -> {tp, sl} while its exits are being edited
+  const cents = (v) => v == null ? "off" : (v * 100).toFixed(1).replace(/\.0$/, "") + "¢";
+  const srcLabel = (s) => s === "BOT" ? "BOT" : "YOU";
+  function positionRow(p, canTrade) {
+    const live = p.status === "live";
+    const e = editing[p.id];
+    const exitsCells = e
+      ? `<td class="r edit-cell"><input type="number" min="1" max="99" step="0.5" placeholder="TP ¢" data-f="tp" data-id="${p.id}" value="${esc(e.tp)}">
+           <input type="number" min="1" max="99" step="0.5" placeholder="SL ¢" data-f="sl" data-id="${p.id}" value="${esc(e.sl)}"></td>`
+      : `<td class="r num">${cents(p.take_profit)} / ${cents(p.stop_loss)}</td>`;
+    const actions = !live ? `<span class="src">awaiting result</span>` : e
+      ? `<div class="row-actions"><button type="button" class="secondary" data-act="save" data-id="${p.id}">Save</button><button type="button" class="ghost" data-act="cancel" data-id="${p.id}">Cancel</button></div>`
+      : `<div class="row-actions"><button type="button" class="ghost" data-act="edit" data-id="${p.id}" ${canTrade ? "" : "disabled"}>Exits</button><button type="button" class="secondary" data-act="sell" data-id="${p.id}" ${canTrade ? "" : "disabled"}>Sell now</button></div>`;
+    return `<tr data-id="${p.id}"${e ? ' data-editing="1"' : ""}>
+      <td><span class="src">${srcLabel(p.source)}</span> #${p.id}</td>
+      <td>${esc(shortRound(p.question))}</td>
+      <td><span class="tag ${p.side === "UP" ? "up" : "down"}">${esc(p.side)}</span></td>
+      <td class="r num">${Number(p.shares).toFixed(2)}</td>
+      <td class="r num">${(p.entry_price * 100).toFixed(1)}¢</td>
+      <td class="r num">${(p.mark_price * 100).toFixed(1)}¢</td>
+      <td class="r num" title="Sell now ≈ ${p.sell_value_inr == null ? "no bids" : inr(p.sell_value_inr)}">${inr(p.value_inr)}</td>
+      <td class="r num ${signCls(p.unrealized_inr)}">${inr(p.unrealized_inr, true)}</td>
+      <td class="r num pos">${inr(p.max_win_inr, true)}</td>
+      ${exitsCells}
+      <td>${actions}</td>
+    </tr>`;
+  }
+  function renderPositions(data) {
+    const rows = data.wallet.positions, body = $("pos-rows");
+    const canTrade = tradingOpen(data);
     if (!rows.length) {
-      $("pos-rows").innerHTML = `<tr><td colspan="10" class="empty">No open positions. A position appears here the moment the bot makes a paper trade.</td></tr>`;
+      body.innerHTML = `<tr><td colspan="11" class="empty">No open positions. Place a paper trade above, or wait for the auto-trader.</td></tr>`;
       return;
     }
-    $("pos-rows").innerHTML = rows.map((p) => `<tr>
-        <td>${esc(etLabel(p.question))}</td>
-        <td><span class="tag ${p.side === "UP" ? "up" : "down"}">${esc(p.side)}</span></td>
-        <td class="r num">${Number(p.shares).toFixed(2)}</td>
-        <td class="r num">${(p.entry_price * 100).toFixed(1)}¢</td>
-        <td class="r num">${(p.mark_price * 100).toFixed(1)}¢</td>
-        <td class="r num">${inr(p.value_inr)}</td>
-        <td class="r num">${p.sell_value_inr == null ? "no bids" : inr(p.sell_value_inr)}</td>
-        <td class="r num ${signCls(p.unrealized_inr)}">${inr(p.unrealized_inr, true)}</td>
-        <td class="r num pos">${inr(p.max_win_inr, true)}</td>
-        <td>${p.status === "live" ? `<span class="status-live">● live</span>` : "awaiting result"}</td>
-      </tr>`).join("");
+    const keep = {};
+    // keep rows already showing the edit inputs, so typing isn't wiped by the refresh
+    for (const tr of body.querySelectorAll('tr[data-editing="1"]')) if (editing[tr.dataset.id]) keep[tr.dataset.id] = tr;
+    for (const id of Object.keys(editing)) if (!rows.some((p) => String(p.id) === id)) delete editing[id];
+    const frag = document.createElement("tbody");
+    frag.innerHTML = rows.map((p) => positionRow(p, canTrade)).join("");
+    for (const tr of [...frag.children]) if (keep[tr.dataset.id]) frag.replaceChild(keep[tr.dataset.id], tr);
+    body.replaceChildren(...frag.children);
   }
+  $("pos-rows").addEventListener("input", (ev) => {
+    const t = ev.target;
+    if (t.dataset.id && editing[t.dataset.id]) editing[t.dataset.id][t.dataset.f] = t.value;
+  });
+  $("pos-rows").addEventListener("click", async (ev) => {
+    const b = ev.target.closest("button[data-act]");
+    if (!b) return;
+    const id = b.dataset.id, p = last && last.wallet.positions.find((x) => String(x.id) === id);
+    if (b.dataset.act === "edit" && p) {
+      editing[id] = {tp: p.take_profit == null ? "" : +(p.take_profit * 100).toFixed(1), sl: p.stop_loss == null ? "" : +(p.stop_loss * 100).toFixed(1)};
+    } else if (b.dataset.act === "cancel") {
+      delete editing[id];
+    } else if (b.dataset.act === "save") {
+      const e = editing[id];
+      b.disabled = true;
+      const ok = await act("SET_EXITS", {position_id: +id, take_profit: e.tp, stop_loss: e.sl}, `Exits for #${id}`);
+      if (ok) delete editing[id]; else b.disabled = false;
+    } else if (b.dataset.act === "sell") {
+      b.disabled = true;
+      await act("SELL", {position_id: +id}, `Sell #${id}`);
+    }
+    if (last) renderPositions(last);
+  });
+
+  // ---------- trade history ----------
+  const endLabel = {TAKE_PROFIT: "Take profit", STOP_LOSS: "Stop loss", SOLD: "Sold", UNRESOLVED: "Refunded (unresolved)"};
+  function renderHistory(rows) {
+    if (!rows.length) return;
+    $("hist-rows").innerHTML = rows.map((h) => {
+      const how = h.close_reason === "RESOLVED" ? (h.side === h.result ? `✓ Won (${esc(h.result)})` : `✗ Lost (${esc(h.result)})`) : esc(endLabel[h.close_reason] || h.close_reason);
+      return `<tr>
+        <td class="num">${esc(timeFmt(h.closed_at))}</td>
+        <td><span class="src">${srcLabel(h.source)}</span> #${h.id}</td>
+        <td>${esc(shortRound(h.question))}</td>
+        <td><span class="tag ${h.side === "UP" ? "up" : "down"}">${esc(h.side)}</span></td>
+        <td class="r num">${inr(h.stake_inr)}</td>
+        <td class="r num">${(h.entry_price * 100).toFixed(1)}¢</td>
+        <td class="r num">${h.exit_price == null ? "" : (h.exit_price * 100).toFixed(1) + "¢"}</td>
+        <td>${how}</td>
+        <td class="r num ${signCls(h.pnl_inr)}">${inr(h.pnl_inr, true)}</td>
+      </tr>`;
+    }).join("");
+  }
+
+  // ---------- actions: queued for the bot, which runs them on its next poll ----------
+  const store = {
+    get() { try { return localStorage.getItem("dashboardKey") || ""; } catch { return ""; } },
+    set(v) { try { localStorage.setItem("dashboardKey", v); } catch { /* per-viewer convenience only */ } },
+  };
+  const waiting = {};  // command id -> resolve(ok, message)
+  function toast(msg, ok) {
+    const t = $("toast");
+    t.textContent = msg; t.className = "toast" + (ok ? "" : " err"); t.hidden = false;
+    clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.hidden = true; }, 5000);
+  }
+  async function act(kind, payload, label, msgEl) {
+    const show = (text, ok) => { if (msgEl) { msgEl.textContent = text; msgEl.className = "form-msg " + (ok ? "ok" : "err"); } toast(text, ok); };
+    if (SNAP) { show("This is a saved snapshot; actions only work on the live dashboard.", false); return false; }
+    const key = $("key").value.trim() || store.get();
+    let res, out;
+    try {
+      res = await fetch("api/command", {method: "POST", headers: {"Content-Type": "application/json", "X-Dashboard-Key": key}, body: JSON.stringify({kind, ...payload})});
+      out = await res.json();
+    } catch { show(`${label}: could not reach the dashboard`, false); return false; }
+    if (res.status === 401) {
+      $("key-field").hidden = false; $("key").focus();
+      show("Enter the dashboard key to place trades", false); return false;
+    }
+    if (!res.ok) { show(`${label}: ${out.error || "refused"}`, false); return false; }
+    if ($("key").value.trim()) store.set($("key").value.trim());
+    if (msgEl) { msgEl.textContent = "Sent to the bot…"; msgEl.className = "form-msg"; }
+    const result = await new Promise((resolve) => {
+      waiting[out.id] = resolve;
+      setTimeout(() => { if (waiting[out.id]) { delete waiting[out.id]; resolve([false, "The bot did not pick this up. Is it running?"]); } }, 35000);
+    });
+    show(result[1], result[0]);
+    refresh();
+    return result[0];
+  }
+  function resolveCommands(cmds) {
+    for (const c of cmds || []) {
+      if (waiting[c.id] && c.status !== "PENDING") { const r = waiting[c.id]; delete waiting[c.id]; r([c.status === "DONE", c.message]); }
+    }
+  }
+
+  // ---------- trade ticket ----------
+  let side = "UP";
+  function tradingOpen(data) {
+    const st = data.bot.status, r = st && st.round;
+    return !SNAP && data.bot.state === "running" && r && r.quote && r.accepting_orders !== false &&
+      (new Date(r.round_end).getTime() - Date.now()) / 1000 > (st.no_trade_last_seconds ?? 3);
+  }
+  for (const s of ["UP", "DOWN"]) {
+    $("side-" + s).addEventListener("click", () => {
+      side = s;
+      for (const o of ["UP", "DOWN"]) $("side-" + o).setAttribute("aria-checked", String(o === s));
+      renderTicket();
+    });
+  }
+  $("chips").addEventListener("click", (ev) => { const b = ev.target.closest("button[data-amt]"); if (b) { $("amt").value = b.dataset.amt; renderTicket(); } });
+  for (const id of ["amt", "tp", "sl"]) $(id).addEventListener("input", () => renderTicket());
+  function renderTicket() {
+    if (!last) return;
+    const r = last.bot.status && last.bot.status.round, q = r && r.quote, rate = last.rules.inr_per_usd;
+    for (const s of ["UP", "DOWN"]) $("ask-" + s).textContent = q && q[s].ask != null ? (q[s].ask * 100).toFixed(1) + "¢" : "–";
+    if (last.actions.key_required && !store.get()) $("key-field").hidden = false;
+    const open = tradingOpen(last);
+    $("place").disabled = !open;
+    const amt = parseFloat($("amt").value);
+    let est;
+    if (!open) est = SNAP ? "Snapshot: trading is off." : (last.bot.state !== "running" ? "The bot is offline, so orders can't be filled." : "Waiting for live prices or the next round…");
+    else if (!(amt > 0)) est = "Enter an amount in ₹.";
+    else if (q[side].ask == null) est = `Nobody is selling ${side} right now, so an order would not fill.`;
+    else {
+      const ask = q[side].ask, shares = amt / rate / ask, fee = shares * last.rules.taker_fee_rate * ask * (1 - ask) * rate;
+      est = `≈ ${shares.toFixed(2)} shares at ${(ask * 100).toFixed(1)}¢ (best ask; bigger orders fill higher) · fee ≈ ${inr(fee)} · pays ${inr(shares * rate)} if ${side} wins.`;
+    }
+    $("est").textContent = est;
+  }
+  $("ticket-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const amt = parseFloat($("amt").value), msg = $("ticket-msg");
+    if (!(amt > 0)) { msg.textContent = "Enter an amount in ₹."; msg.className = "form-msg err"; return; }
+    $("place").disabled = true;
+    await act("BUY", {side, amount_inr: amt, take_profit: $("tp").value, stop_loss: $("sl").value}, `Buy ${side}`, msg);
+    renderTicket();
+  });
+
+  // ---------- auto-trader ----------
+  let autoDirty = false;
+  for (const id of ["auto-tp", "auto-sl"]) $(id).addEventListener("input", () => { autoDirty = true; });
+  function renderAuto(data) {
+    const st = data.bot.status, s = st && st.bot_settings;
+    $("auto-stake").textContent = Number(data.rules.stake_inr).toLocaleString("en-IN");
+    const off = SNAP || data.bot.state !== "running";
+    if (!s) { $("auto-state").textContent = "Bot offline"; $("auto-state").className = "auto-state"; $("auto-toggle").disabled = true; $("auto-save").disabled = true; return; }
+    $("auto-state").textContent = s.enabled ? "Trading" : "Paused";
+    $("auto-state").className = "auto-state " + (s.enabled ? "on" : "off");
+    $("auto-toggle").textContent = s.enabled ? "Pause" : "Resume";
+    $("auto-toggle").disabled = off; $("auto-save").disabled = off;
+    if (!autoDirty) {
+      $("auto-tp").value = s.take_profit == null ? "" : +(s.take_profit * 100).toFixed(1);
+      $("auto-sl").value = s.stop_loss == null ? "" : +(s.stop_loss * 100).toFixed(1);
+    }
+  }
+  const autoCurrent = () => (last && last.bot.status && last.bot.status.bot_settings) || {enabled: true};
+  const toCents = (v) => v == null ? "" : +(v * 100).toFixed(1);
+  $("auto-toggle").addEventListener("click", async () => {
+    const s = autoCurrent();
+    $("auto-toggle").disabled = true;
+    await act("BOT_SETTINGS", {enabled: !s.enabled, take_profit: toCents(s.take_profit), stop_loss: toCents(s.stop_loss)}, "Auto-trader", $("auto-msg"));
+  });
+  $("auto-save").addEventListener("click", async () => {
+    $("auto-save").disabled = true;
+    const ok = await act("BOT_SETTINGS", {enabled: autoCurrent().enabled, take_profit: $("auto-tp").value, stop_loss: $("auto-sl").value}, "Auto-trader exits", $("auto-msg"));
+    if (ok) autoDirty = false;
+  });
 
   function niceTicks(lo, hi, n) {
     const raw = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
@@ -568,7 +865,9 @@
       }
       last = data; lastOk = Date.now();
       TZ = data.rules.timezone || TZ;
-      renderBot(data.bot); renderRound(data); renderTiles(data); renderWallet(data); renderChart(data.pnl_series, data.wallet); renderRows(data.recent);
+      resolveCommands(data.commands);
+      renderBot(data.bot); renderRound(data); renderTiles(data); renderWallet(data); renderPositions(data);
+      renderTicket(); renderAuto(data); renderChart(data.pnl_series, data.wallet); renderHistory(data.history); renderRows(data.recent);
     } catch (e) {
       $("bot-dot").className = "dot offline";
       $("bot-state").textContent = "Dashboard unreachable";

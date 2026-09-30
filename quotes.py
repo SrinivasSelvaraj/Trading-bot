@@ -119,3 +119,50 @@ def simulate_buy(book: Book, usd: float, max_price: float, fee_rate: float) -> F
     if book.min_order_size and shares < book.min_order_size:
         return Fill(False, f"{shares:.2f} shares is below min order size {book.min_order_size}")
     return Fill(True, "filled", usd_spent=usd, shares=shares, avg_price=usd / shares, fee_usd=fee)
+
+
+def with_complement_bids(book: Book, other: Book) -> Book:
+    """Everyone you could sell this outcome to.
+
+    Besides this outcome's own bids, a sell can match a *sell* of the opposite outcome
+    (the exchange merges the pair back into 1 USDC), so an ask of p on the other side
+    acts like a bid of 1 - p here.
+    """
+    merged: dict[float, float] = {}
+    for price, size in book.bids:
+        merged[price] = merged.get(price, 0.0) + size
+    for price, size in other.asks:
+        comp = round(1 - price, 6)
+        merged[comp] = merged.get(comp, 0.0) + size
+    bids = sorted(merged.items(), reverse=True)
+    return Book(bids, book.asks, book.last_trade, book.timestamp_ms, book.min_order_size)
+
+
+@dataclass(frozen=True)
+class Sale:
+    filled: bool
+    reason: str
+    proceeds_usd: float = 0.0
+    avg_price: float = 0.0
+    fee_usd: float = 0.0
+
+
+def simulate_sell(book: Book, shares: float, fee_rate: float) -> Sale:
+    """Fill-or-kill market sell of `shares`, walking the bids from the best price down."""
+    if shares <= 0:
+        return Sale(False, "nothing to sell")
+    remaining = shares
+    proceeds = 0.0
+    fee = 0.0
+    for price, size in book.bids:
+        take = min(remaining, size)
+        proceeds += take * price
+        fee += polymarket_taker_fee(take, price, fee_rate)
+        remaining -= take
+        if remaining <= 1e-9:
+            break
+    if remaining > 1e-9:
+        if book.best_bid is None:
+            return Sale(False, "no buyers (empty bid side)")
+        return Sale(False, f"not enough buyers for {shares:.2f} shares (best bid {book.best_bid:.3f})")
+    return Sale(True, "sold", proceeds_usd=proceeds, avg_price=proceeds / shares, fee_usd=fee)

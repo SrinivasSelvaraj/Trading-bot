@@ -23,6 +23,13 @@ echo "Setting config vars (paper mode only)..."
 curl -fsS "${H[@]}" -X PATCH "$API/apps/$APP/config-vars" \
   -d '{"PAPER_MODE":"True","TIMEZONE":"Asia/Kolkata"}' >/dev/null
 
+# The dashboard's trading buttons need a key on a public URL. Create one the first time only.
+if ! curl -fsS "${H[@]}" "$API/apps/$APP/config-vars" | python3 -c "import json,sys; sys.exit(0 if json.load(sys.stdin).get('DASHBOARD_KEY') else 1)"; then
+  KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(12))")
+  curl -fsS "${H[@]}" -X PATCH "$API/apps/$APP/config-vars" -d "{\"DASHBOARD_KEY\":\"$KEY\"}" >/dev/null
+  echo "Dashboard key (needed for the trading buttons): $KEY"
+fi
+
 echo "Pushing $REF..."
 git push "https://heroku:${HEROKU_API_KEY}@git.heroku.com/${APP}.git" "${REF}:refs/heads/main"
 
