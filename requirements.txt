@@ -1,4 +1,2 @@
 requests>=2.31
-tzdata>=2024.1        # timezone data (needed on Windows for Asia/Kolkata)
-playwright>=1.45      # optional: only for the browser mirror (BROWSER_ENABLED=True)
-pytest>=8.0           # tests
+tzdata>=2024.1        # timezone data (needed on Windows and slim containers for Asia/Kolkata)

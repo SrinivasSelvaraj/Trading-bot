@@ -21,7 +21,7 @@ Requires Python 3.10+.
 git clone <this repo> && cd Trading-bot
 python -m venv .venv
 # Windows: .venv\Scripts\activate      macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # or requirements.txt for just the bot (no tests/browser)
 cp .env.example .env          # Windows: copy .env.example .env   (optional; defaults are fine)
 
 python bot.py --check         # one-shot: current round, UP/DOWN %, what the rule says
@@ -64,6 +64,7 @@ when Polymarket resolves it: record the result and P/L, append a row to trades.c
 | `browser.py` | optional read-only browser window (Playwright) |
 | `report.py` | summary of results |
 | `dashboard.py` + `web/index.html` | read-only web dashboard |
+| `app.py`, `Procfile`, `deploy_heroku.sh` | hosted mode: bot + dashboard in one process (Heroku) |
 | `config.py` / `.env` | settings |
 
 ### Checks before any (paper) trade
@@ -137,6 +138,22 @@ Stop the tunnel (Ctrl+C) and the link dies. To share a frozen copy instead, save
 ```bash
 python dashboard.py --snapshot dashboard-snapshot.html
 ```
+
+## Deploy to Heroku
+
+`app.py` runs the bot in a background thread and serves the dashboard on `$PORT`, in one web dyno so both share the same files.
+
+```bash
+export HEROKU_API_KEY=...                # heroku authorizations:create, or Account Settings → API Key
+./deploy_heroku.sh my-btc-paper-bot      # creates the app if needed, pushes, starts 1 web dyno
+```
+
+Or with the Heroku CLI: `heroku create my-btc-paper-bot && git push heroku HEAD:main && heroku ps:scale web=1`.
+
+Limits to know:
+- **Data resets on every restart.** Heroku's filesystem is temporary, and dynos restart at least once a day and on every deploy, so `trades.db` starts empty each time. Use Heroku for a demo; keep the long paper record on your own machine (or add a Heroku Postgres database).
+- **Eco dynos sleep** after 30 minutes without web traffic, which pauses the bot. Use a Basic dyno for 24/7 monitoring.
+- The app only reads Polymarket's public data and stays in paper mode. The public URL is read-only.
 
 ## Optional browser window
 
