@@ -325,6 +325,9 @@ def test_restart_mid_round_does_not_duplicate(env):
     bot2.tick()
     assert bot2.state.fill_status == FILLED
     assert store.conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 1
+    bot2._close_round(bot2.state)  # entry values survive the restart
+    row = store.get_round(slug_for(START))
+    assert (row["up_percentage"], row["down_percentage"]) == (98.0, 2.0)
 
 
 def test_live_mode_refused(env):

@@ -177,6 +177,10 @@ class Bot:
         st = RoundState(rnd=rnd, mode=self.mode)
         existing = self.store.get_round(rnd.slug)
         if existing:  # restarted mid-round: carry on from what was recorded
+            restored = {"up_percentage": "up", "down_percentage": "down"}
+            for col, attr in restored.items():
+                if existing.get(col) is not None:
+                    setattr(st, attr, existing[col])
             for key in ("btc_price_start", "peak_up", "peak_down", "decision", "fill_status",
                         "reason", "signal_at", "seconds_left_at_signal", "btc_price_signal"):
                 if existing.get(key) is not None:
